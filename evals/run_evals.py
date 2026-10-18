@@ -595,6 +595,160 @@ def _():
     expect(len(refused) == 1, f"audit {refused}")
 
 
+@case("failure: a mid-plan failure stops execution, steps accounted")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped, ship date "
+                      "2026-10-20, carrier DHL", "op")
+    svc.confirm(task.task_id, "s.hale")
+    error = ("element not found: no field labelled 'Ship date' "
+             "on the Orders form")
+    task = svc.execute(task.task_id, "offline", fail={2: error})
+    expect(task.status == TaskStatus.EXECUTION_FAILED,
+           f"status {task.status}")
+    expect(task.failed_step == 2 and task.failure_error == error,
+           f"failure {task.failed_step} {task.failure_error}")
+    order = svc.store.get_record("orders", "1032")
+    expect(order["status"] == "shipped", "step 1 did not stand")
+    expect(order["ship_date"] == "" and order["carrier"] == "",
+           "a step after the failure ran")
+    attempts = svc.get_attempts(task.task_id)
+    expect(len(attempts) == 1 and attempts[0].outcome == "failed",
+           f"attempts {attempts}")
+    expect([o.seq for o in attempts[0].steps] == [1, 2],
+           "the attempt's step accounting is wrong")
+    expect(attempts[0].state_lines == [
+        "step 1: orders 1032.status is now 'shipped'"],
+        f"state lines {attempts[0].state_lines}")
+    expect(svc.get_verification(task.task_id) is None,
+           "a failure produced a verification verdict")
+
+
+@case("failure: resume runs only what is left, and verifies")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT + " and mark invoice 4471 as paid", "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline",
+                       fail={2: "bridge timeout after 30s"})
+    expect(task.status == TaskStatus.EXECUTION_FAILED,
+           f"status {task.status}")
+    task = svc.resume_execution(task.task_id)
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    memos = svc.store.list_records("credit_memos")
+    expect(len(memos) == 1, f"{len(memos)} memos — the create re-ran")
+    expect(svc.store.get_record("invoices", "4471")["status"] == "paid",
+           "the remaining step did not land")
+    executed = [e["detail"]["seq"] for e in svc.audit(task.task_id)
+                if e["event"] == "step_executed"]
+    expect(executed == [1, 2], f"executed steps {executed}")
+
+
+@case("failure: a completed step changed underneath blocks resume")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped, ship date "
+                      "2026-10-20, carrier DHL", "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline",
+                       fail={3: "bridge timeout after 30s"})
+    apply_field_change(svc.store, "orders", "1032", "status",
+                       "delivered")
+    try:
+        svc.resume_execution(task.task_id)
+    except GateError as exc:
+        expect("step 1" in str(exc), f"refusal does not name it: {exc}")
+    else:
+        raise AssertionError("a moved basis was resumed over")
+    task = svc.get_task(task.task_id)
+    expect(task.status == TaskStatus.EXECUTION_FAILED,
+           f"status {task.status}")
+    expect(svc.store.get_record("orders", "1032")["carrier"] == "",
+           "the refused resume wrote something")
+
+
+@case("failure: restart is refused once a create has landed")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT + " and mark invoice 4471 as paid", "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline",
+                       fail={2: "bridge timeout after 30s"})
+    try:
+        svc.restart_execution(task.task_id)
+    except GateError as exc:
+        expect("never run twice" in str(exc), f"reason: {exc}")
+    else:
+        raise AssertionError("a restart re-ran a completed create")
+    expect(len(svc.store.list_records("credit_memos")) == 1,
+           "the refused restart created a second memo")
+    # The exit that remains open works.
+    task = svc.resume_execution(task.task_id)
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+
+
+@case("failure: abandon closes the task, partial state named")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped, ship date "
+                      "2026-10-20, carrier DHL", "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline",
+                       fail={2: "form rejected: duplicate shipment"})
+    try:
+        svc.abandon(task.task_id, "op", "")
+    except GateError:
+        pass
+    else:
+        raise AssertionError("an abandonment without a reason stood")
+    task = svc.abandon(task.task_id, "op",
+                       "the shipment is being rebooked by hand")
+    expect(task.status == TaskStatus.ABANDONED, f"status {task.status}")
+    entry = [e for e in svc.audit(task.task_id)
+             if e["event"] == "task_abandoned"][0]
+    expect(entry["detail"]["partial_state"] == [
+        "step 1: orders 1032.status is now 'shipped'"],
+        f"partial state {entry['detail']['partial_state']}")
+    order = svc.store.get_record("orders", "1032")
+    expect(order["status"] == "shipped" and order["carrier"] == "",
+           "the partial state was cleaned up or written over")
+    try:
+        svc.resume_execution(task.task_id)
+    except GateError:
+        pass
+    else:
+        raise AssertionError("an abandoned task was resumed")
+
+
+@case("failure: a second execute is refused — verified or in flight")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped", "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    try:
+        svc.execute(task.task_id, "offline")
+    except GateError:
+        pass
+    else:
+        raise AssertionError("a verified task executed again")
+    task = svc.intake("mark order 1036 as shipped", "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "page-agent-live")
+    expect(task.status == TaskStatus.CONFIRMED, f"status {task.status}")
+    try:
+        svc.execute(task.task_id, "offline")
+    except GateError as exc:
+        expect("in flight" in str(exc), f"reason: {exc}")
+    else:
+        raise AssertionError("a second attempt started mid-flight")
+    refused = [e for e in svc.audit(task.task_id)
+               if e["event"] == "execution_refused"]
+    expect(refused and refused[-1]["detail"]["code"]
+           == "attempt_in_flight", f"audit {refused}")
+
+
 def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     for name, ok, detail in RESULTS:
