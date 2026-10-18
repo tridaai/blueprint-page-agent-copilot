@@ -683,7 +683,7 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 359 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 360 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
 make evals   # 92/92 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
