@@ -2807,6 +2807,168 @@ def _():
         wire.close()
 
 
+# -- Round 18: dual control -------------------------------------------------
+# The gate scales with the stakes: a plan whose total credit
+# reaches the governed threshold, or that touches a high-stakes
+# field (a customer's credit limit), is confirmed by TWO distinct
+# operators — neither of them the planner — each binding the same
+# plan version. The first confirmation is a seat; the task stands
+# PLANNED until the second lands, and execution from there
+# refuses, naming the confirmer it is owed. Below the threshold,
+# nothing changes: one confirmer, as always.
+
+AT_CAP = ("raise a credit memo for invoice 4471, reason damaged "
+          "goods, $500")
+
+
+def _enrol_second(svc) -> str:
+    """A second confirm-capable operator for the second seat —
+    enrolment is a recorded supervisor act, as at any door."""
+    svc.enroll_operator("s.hale", "r.osei", "operator")
+    return "r.osei"
+
+
+@case("dual control: an at-cap credit executes only after two "
+      "distinct confirmers")
+def _():
+    svc = fresh()
+    second = _enrol_second(svc)
+    task = svc.intake(AT_CAP, "op")
+    expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+    view = svc.dual_control_view(task)
+    expect(view["required"] and view["reasons"] == ["amount"],
+           f"assessment {view}")
+    task = svc.confirm(task.task_id, "s.hale")
+    expect(task.status == TaskStatus.PLANNED,
+           f"one seat completes nothing: {task.status}")
+    expect(task.confirmed_by is None,
+           "no completed confirmation stands after one seat")
+    try:
+        svc.execute(task.task_id, "offline")
+        expect(False, "execution ran on one confirmation")
+    except GateError as exc:
+        expect("second, different confirmer" in str(exc),
+               f"execution refusal names the owed seat: {exc}")
+    task = svc.confirm(task.task_id, second)
+    expect(task.status == TaskStatus.CONFIRMED,
+           f"status {task.status}")
+    expect(task.confirmed_version == 1, "the gate binds v1")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    memos = svc.store.list_records("credit_memos")
+    expect(len(memos) == 1 and memos[0]["amount"] == "500.00",
+           f"memo {memos}")
+
+
+@case("dual control: the same confirmer twice, and the planner, "
+      "fill no second seat")
+def _():
+    svc = fresh()
+    _enrol_second(svc)
+    task = svc.intake(AT_CAP, "op")
+    svc.confirm(task.task_id, "s.hale")
+    for name in ("s.hale", " S.Hale ", "op"):
+        try:
+            svc.confirm(task.task_id, name)
+            expect(False, f"{name!r} filled a second seat")
+        except GateError:
+            pass
+    codes = [e["detail"]["code"] for e in svc.audit(task.task_id)
+             if e["event"] == "confirmation_refused"]
+    expect(codes == ["already_confirmed", "already_confirmed",
+                     "self_confirmation"],
+           f"refusal codes {codes}")
+    task = svc.get_task(task.task_id)
+    expect(task.status == TaskStatus.PLANNED,
+           f"status {task.status}")
+    expect(len(task.confirmations) == 1, "exactly one seat stands")
+
+
+@case("dual control: a below-threshold plan confirms with one "
+      "person, as before")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")  # $120 — ordinary stakes
+    view = svc.dual_control_view(task)
+    expect(not view["required"] and view["seats_required"] == 1,
+           f"assessment {view}")
+    task = svc.confirm(task.task_id, "s.hale")
+    expect(task.status == TaskStatus.CONFIRMED,
+           f"status {task.status}")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+
+
+@case("dual control: a credit-limit plan is dual by its field, "
+      "not its amount")
+def _():
+    svc = fresh()
+    second = _enrol_second(svc)
+    task = svc.intake("update customer 2041 credit limit to 30000",
+                      "s.hale")
+    view = svc.dual_control_view(task)
+    expect(view["required"] and view["reasons"] == ["field"]
+           and view["total_credited"] == "0.00",
+           f"assessment {view}")
+    svc.confirm(task.task_id, "op")
+    task = svc.get_task(task.task_id)
+    expect(task.status == TaskStatus.PLANNED,
+           f"one seat: {task.status}")
+    svc.confirm(task.task_id, second)
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    cust = svc.store.get_record("customers", "2041")
+    expect(cust["credit_limit"] == "30000",
+           f"credit_limit {cust['credit_limit']}")
+
+
+@case("dual control: an amendment after the first seat resets "
+      "the count to zero")
+def _():
+    svc = fresh()
+    second = _enrol_second(svc)
+    task = svc.intake(AT_CAP, "op")
+    svc.confirm(task.task_id, "s.hale")
+    task, plan, _ = svc.amend(
+        task.task_id, "op",
+        [AmendChangeIn(seq=1, fields={"reason": "goodwill"})])
+    expect(plan.version == 2, f"plan v{plan.version}")
+    expect(task.confirmations == [],
+           f"seats after amendment: {task.confirmations}")
+    task = svc.confirm(task.task_id, "s.hale")
+    expect(task.status == TaskStatus.PLANNED,
+           "the v1 seat counted for nothing on v2")
+    task = svc.confirm(task.task_id, second)
+    expect(task.status == TaskStatus.CONFIRMED
+           and task.confirmed_version == 2,
+           f"gate binds v2: {task.confirmed_version}")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    memo = svc.store.list_records("credit_memos")[0]
+    expect(memo["amount"] == "500.00"
+           and memo["reason"] == "goodwill", f"memo {memo}")
+
+
+@case("dual control: a read-back fills one seat, a plain "
+      "confirmation the other")
+def _():
+    svc = fresh()
+    second = _enrol_second(svc)
+    task = svc.intake(AT_CAP, "op")
+    issued = svc.issue_readback(task.task_id, "s.hale")
+    task = svc.confirm_readback(task.task_id, "s.hale",
+                                issued["token"])
+    expect(task.status == TaskStatus.PLANNED,
+           f"read-back seat one completes nothing: {task.status}")
+    expect(task.confirmations[0].method == "readback",
+           f"seat {task.confirmations}")
+    task = svc.confirm(task.task_id, second)
+    expect(task.status == TaskStatus.CONFIRMED,
+           f"status {task.status}")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+
+
 def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     for name, ok, detail in RESULTS:
