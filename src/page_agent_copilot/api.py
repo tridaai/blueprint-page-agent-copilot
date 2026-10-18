@@ -28,11 +28,13 @@ from .models import (
     ExecuteIn,
     RejectIn,
     ReplanIn,
+    RoleUpdateIn,
     StepReportIn,
     TaskIntake,
 )
 from .policy import PlanRefusal
 from .records import apply_field_change, create_credit_memo
+from .roles import RoleError
 from .service import CopilotService, GateError
 from .store import Store, build_store
 
@@ -73,6 +75,13 @@ def create_app(settings: Optional[Settings] = None,
         # ungoverned status): the request was well-formed and the
         # state machine allowed the attempt, but policy says no.
         # Nothing was changed.
+        return JSONResponse(status_code=422, content={
+            "detail": exc.message, "code": exc.code})
+
+    @app.exception_handler(RoleError)
+    async def role_error(_: Request, exc: RoleError):
+        # A role definition that does not validate (or names no
+        # role): refused whole, nothing stored.
         return JSONResponse(status_code=422, content={
             "detail": exc.message, "code": exc.code})
 
@@ -258,8 +267,41 @@ def create_app(settings: Optional[Settings] = None,
 
     @app.post("/api/tasks/{task_id}/execute")
     def execute(task_id: str, body: ExecuteIn):
-        task = service.execute(task_id, body.driver)
+        task = service.execute(task_id, body.driver,
+                               operator=body.operator)
         return task.model_dump(mode="json")
+
+    # -- roles ---------------------------------------------------------
+    @app.get("/api/roles")
+    def roles():
+        return {
+            "roles": [r.model_dump(mode="json")
+                      for r in service.list_roles()],
+            "operators": service.list_operators(),
+        }
+
+    @app.get("/api/roles/{name}")
+    def role(name: str):
+        found = service.get_role(name)
+        if found is None:
+            raise KeyError(f"role {name} does not exist")
+        return found.model_dump(mode="json")
+
+    @app.put("/api/roles/{name}")
+    def update_role(name: str, body: RoleUpdateIn):
+        # A recorded act: who is changing the definition rides in
+        # the body, and the service refuses anyone whose role may
+        # not administer roles (409) and any definition the strict
+        # loader refuses (422). The change lands in the roles audit.
+        role = service.update_role(
+            name, body.model_dump(mode="json",
+                                  exclude={"operator"}),
+            body.operator)
+        return role.model_dump(mode="json")
+
+    @app.get("/api/roles-audit")
+    def roles_audit():
+        return service.role_audit()
 
     @app.post("/api/tasks/{task_id}/steps/{seq}/report")
     def report_step(task_id: str, seq: int, body: StepReportIn):
