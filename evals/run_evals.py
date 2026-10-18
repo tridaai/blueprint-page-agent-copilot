@@ -70,7 +70,7 @@ def _():
     svc = fresh()
     task = svc.intake(CREDIT, "op")
     expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline")
     expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
     memos = svc.store.list_records("credit_memos")
@@ -86,7 +86,7 @@ def _():
     svc = fresh()
     before = svc.store.get_record("orders", "1032")
     task = svc.intake("mark order 1032 as shipped", "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline")
     expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
     after = svc.store.get_record("orders", "1032")
@@ -99,7 +99,7 @@ def _():
 def _():
     svc = fresh()
     task = svc.intake("update customer 2041 phone to 555-0134", "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline")
     expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
     cust = svc.store.get_record("customers", "2041")
@@ -112,7 +112,7 @@ def _():
 def _():
     svc = fresh()
     task = svc.intake("mark invoice 4474 as paid", "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline")
     expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
     expect(svc.store.get_record("invoices", "4474")["status"] == "paid",
@@ -168,7 +168,7 @@ def _():
 def _():
     svc = fresh()
     task = svc.intake("mark order 1032 as shipped", "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline", tamper={1: "placed"})
     expect(task.status == TaskStatus.DISCREPANCY, f"status {task.status}")
     failed = [e for e in svc.audit(task.task_id)
@@ -183,7 +183,7 @@ def _():
 def _():
     svc = fresh()
     task = svc.intake("mark order 1032 as shipped", "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     svc.execute(task.task_id, "page-agent-live")
     apply_field_change(svc.store, "orders", "1032", "status", "shipped")
     task = svc.report_step(task.task_id, 1, StepReportIn(ok=True))
@@ -194,7 +194,7 @@ def _():
 def _():
     svc = fresh()
     task = svc.intake(CREDIT, "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     svc.execute(task.task_id, "page-agent-live")
     task = svc.report_step(task.task_id, 1, StepReportIn(ok=True))
     expect(task.status == TaskStatus.DISCREPANCY, f"status {task.status}")
@@ -220,7 +220,7 @@ def _():
     task = svc.intake(CREDIT + " and mark invoice 4471 as paid", "op")
     plan = svc.get_plan(task.task_id)
     expect(len(plan.steps) == 2, f"steps {len(plan.steps)}")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline")
     expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
     memo = svc.store.list_records("credit_memos")[0]
@@ -238,7 +238,7 @@ def _():
     before = svc.store.get_record("orders", "1032")
     task = svc.intake("mark order 1032 as shipped, ship date "
                       "2026-10-20, carrier DHL", "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline")
     expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
     after = svc.store.get_record("orders", "1032")
@@ -251,7 +251,7 @@ def _():
 def _():
     svc = fresh()
     task = svc.intake(CREDIT + " and mark invoice 4471 as paid", "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline", tamper={2: "open"})
     expect(task.status == TaskStatus.DISCREPANCY, f"status {task.status}")
     failed = [e for e in svc.audit(task.task_id)
@@ -267,7 +267,7 @@ def _():
     task = svc.intake(CREDIT, "op")
     svc.amend(task.task_id, "op",
               [AmendChangeIn(seq=1, fields={"amount": "150.00"})])
-    task = svc.confirm(task.task_id, "op")
+    task = svc.confirm(task.task_id, "s.hale")
     expect(task.confirmed_version == 2,
            f"confirmed_version {task.confirmed_version}")
     task = svc.execute(task.task_id, "offline")
@@ -283,7 +283,7 @@ def _():
 def _():
     svc = fresh()
     task = svc.intake(CREDIT, "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     try:
         svc.amend(task.task_id, "op",
                   [AmendChangeIn(seq=1, fields={"amount": "150.00"})])
@@ -318,7 +318,7 @@ def _():
 def _():
     svc = fresh()
     task = svc.intake("mark order 1032 as shipped", "op")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     apply_field_change(svc.store, "orders", "1032", "carrier", "FedEx")
     try:
         svc.execute(task.task_id, "offline")
@@ -338,11 +338,134 @@ def _():
     expect(task.plan_version == 2, f"version {task.plan_version}")
     expect(svc.get_plan(task.task_id, 1).superseded is True,
            "the stale version was not marked superseded")
-    svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "s.hale")
     task = svc.execute(task.task_id, "offline")
     expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
     expect(svc.store.get_record("orders", "1032")["status"] == "shipped",
            "the re-planned task did not land")
+
+
+@case("permissions: a viewer cannot plan")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "v.ward")
+    expect(task.status == TaskStatus.REFUSED, f"status {task.status}")
+    expect("role_cannot_plan" in (task.refusal_reason or ""),
+           f"reason {task.refusal_reason}")
+    expect("viewer" in (task.refusal_reason or ""),
+           "the refusal does not name the role")
+    expect(svc.store.list_records("credit_memos") == [],
+           "a viewer produced a credit memo")
+
+
+@case("permissions: a supervisor-only field is refused for an operator")
+def _():
+    svc = fresh()
+    task = svc.intake("update customer 2041 credit limit to 30000",
+                      "op")
+    expect(task.status == TaskStatus.REFUSED, f"status {task.status}")
+    expect("field_not_permitted" in (task.refusal_reason or ""),
+           f"reason {task.refusal_reason}")
+    expect("credit_limit" in (task.refusal_reason or "")
+           and "operator" in (task.refusal_reason or ""),
+           "the refusal does not name the field and the role")
+    # The same task is a supervisor's to plan, and it verifies.
+    task = svc.intake("update customer 2041 credit limit to 30000",
+                      "s.hale")
+    expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+    svc.confirm(task.task_id, "op")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    cust = svc.store.get_record("customers", "2041")
+    expect(cust["credit_limit"] == "30000",
+           f"credit_limit {cust['credit_limit']}")
+
+
+@case("permissions: self-confirmation is refused, and recorded")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    try:
+        svc.confirm(task.task_id, "op")
+    except GateError:
+        pass
+    else:
+        raise AssertionError("the planner confirmed their own plan")
+    task = svc.get_task(task.task_id)
+    expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+    refused = [e for e in svc.audit(task.task_id)
+               if e["event"] == "confirmation_refused"]
+    expect(len(refused) == 1
+           and refused[0]["detail"]["code"] == "self_confirmation",
+           f"audit {refused}")
+
+
+@case("permissions: supervisor confirmation succeeds end to end")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    task = svc.confirm(task.task_id, "s.hale")
+    expect(task.status == TaskStatus.CONFIRMED, f"status {task.status}")
+    expect(task.confirmed_by == "s.hale",
+           f"confirmed_by {task.confirmed_by}")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+
+
+@case("permissions: a role narrowed after confirmation blocks execution")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped", "op")
+    svc.confirm(task.task_id, "s.hale")
+    raw = svc.get_role("operator").model_dump(mode="json")
+    raw["fields"]["orders"] = ["carrier", "ship_date"]
+    svc.update_role("operator", raw, "s.hale")
+    try:
+        svc.execute(task.task_id, "offline")
+    except GateError as exc:
+        expect("status" in str(exc) and "operator" in str(exc),
+               f"refusal does not name field and role: {exc}")
+    else:
+        raise AssertionError("a narrowed role still executed")
+    task = svc.get_task(task.task_id)
+    expect(task.status == TaskStatus.CONFIRMED, f"status {task.status}")
+    expect(task.driver is None, "execution started under a refusal")
+    order = svc.store.get_record("orders", "1032")
+    expect(order["status"] == "packed", "the blocked run wrote")
+    refused = [e for e in svc.audit(task.task_id)
+               if e["event"] == "execution_refused"]
+    expect(len(refused) == 1
+           and refused[0]["detail"]["field"] == "status",
+           f"audit {refused}")
+    # Restoring the field lets the same confirmed plan execute.
+    raw["fields"]["orders"] = ["carrier", "ship_date", "status"]
+    svc.update_role("operator", raw, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+
+
+@case("permissions: role edits are recorded acts, with their diff")
+def _():
+    svc = fresh()
+    raw = svc.get_role("operator").model_dump(mode="json")
+    raw["fields"]["orders"] = ["carrier", "ship_date"]
+    svc.update_role("operator", raw, "s.hale")
+    audit = svc.role_audit()
+    expect(len(audit) == 1, f"role audit {audit}")
+    entry = audit[0]
+    expect(entry["event"] == "role_updated"
+           and entry["actor"] == "s.hale" and entry["ts"],
+           f"entry {entry}")
+    changes = {c["field"]: c for c in entry["detail"]["changes"]}
+    expect(changes["fields.orders"]["new"] == ["carrier", "ship_date"],
+           f"changes {changes}")
+    # An operator may not edit roles at all.
+    try:
+        svc.update_role("operator", raw, "op")
+    except GateError:
+        pass
+    else:
+        raise AssertionError("an operator edited a role definition")
 
 
 def main() -> int:

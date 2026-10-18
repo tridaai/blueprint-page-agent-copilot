@@ -12,9 +12,11 @@ CREDIT = ("raise a credit memo for invoice 4471, reason damaged "
 
 
 def plan_and_confirm(service, text=CREDIT):
+    # Planned by the operator, confirmed by the supervisor:
+    # confirmation is a second person's act (see roles.py).
     task = service.intake(text, "j.okafor")
     assert task.status == TaskStatus.PLANNED
-    return service.confirm(task.task_id, "j.okafor")
+    return service.confirm(task.task_id, "s.hale")
 
 
 def test_unconfirmed_execution_is_refused(service):
@@ -26,9 +28,9 @@ def test_unconfirmed_execution_is_refused(service):
 
 def test_confirm_requires_planned(service):
     task = service.intake(CREDIT, "j.okafor")
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     with pytest.raises(GateError):
-        service.confirm(task.task_id, "j.okafor")
+        service.confirm(task.task_id, "s.hale")
 
 
 def test_happy_path_verifies_exactly(service):

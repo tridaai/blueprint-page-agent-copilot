@@ -42,9 +42,11 @@ def test_full_lifecycle_over_http(client):
     assert blocked.status_code == 409  # unconfirmed cannot execute
 
     confirmed = client.post(f"/api/tasks/{tid}/confirm",
-                            json={"operator": "j.okafor"})
+                            json={"operator": "s.hale"})
     assert confirmed.json()["status"] == "CONFIRMED"
-    assert confirmed.json()["confirmed_by"] == "j.okafor"
+    # The confirmer is the supervisor, not the planner: confirmation
+    # is a second person's act (self-confirmation is refused).
+    assert confirmed.json()["confirmed_by"] == "s.hale"
 
     done = client.post(f"/api/tasks/{tid}/execute",
                        json={"driver": "offline"})

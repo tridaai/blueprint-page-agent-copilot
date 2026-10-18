@@ -30,8 +30,10 @@ def run_demo() -> int:
     for step in plan.steps:
         print(f"  step {step.seq}: {step.instruction}")
 
-    task = service.confirm(task.task_id, "j.okafor")
-    print(f"confirmed by {task.confirmed_by}")
+    # Confirmation is a second person's act: the supervisor
+    # confirms the operator's plan (self-confirmation is refused).
+    task = service.confirm(task.task_id, "s.hale")
+    print(f"confirmed by {task.confirmed_by} (supervisor)")
     task = service.execute(task.task_id, "offline")
     print(f"after execution (offline driver): {task.status.value}")
     memo = service.store.list_records("credit_memos")[0]

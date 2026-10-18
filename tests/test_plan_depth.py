@@ -38,7 +38,7 @@ def test_credit_memo_plus_invoice_status_one_plan_two_records(service):
     # not two (both steps derive from invoice 4471).
     assert [(p.record_kind, p.record_id) for p in plan.preconditions] == [
         ("invoices", "4471")]
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     task = service.execute(task.task_id, "offline")
     assert task.status == TaskStatus.VERIFIED
     memos = service.store.list_records("credit_memos")
@@ -57,7 +57,7 @@ def test_ship_details_three_steps_one_record_exact_diff(service):
     assert [(s.field, s.value) for s in plan.steps] == [
         ("status", "shipped"), ("ship_date", "2026-10-20"),
         ("carrier", "DHL")]
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     task = service.execute(task.task_id, "offline")
     assert task.status == TaskStatus.VERIFIED
     after = service.store.get_record("orders", "1032")
@@ -73,7 +73,7 @@ def test_compound_status_changes_across_two_records(service):
     assert plan.task_type == "status_changes"
     assert [(s.record_kind, s.record_id) for s in plan.steps] == [
         ("orders", "1036"), ("invoices", "4474")]
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     task = service.execute(task.task_id, "offline")
     assert task.status == TaskStatus.VERIFIED
     assert service.store.get_record("orders", "1036")["status"] == "packed"
@@ -82,7 +82,7 @@ def test_compound_status_changes_across_two_records(service):
 
 def test_failing_step_is_named_in_the_discrepancy(service):
     task = service.intake(CREDIT_AND_SETTLE, "j.okafor")
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     # The invoice step (seq 2) writes 'open' instead of 'paid'.
     task = service.execute(task.task_id, "offline", tamper={2: "open"})
     assert task.status == TaskStatus.DISCREPANCY
@@ -117,7 +117,7 @@ def test_amendment_creates_v2_and_confirmation_binds_v2(service):
     v1 = service.get_plan(task.task_id, 1)
     assert v1.superseded is True and v1.steps[0].value == "555-0134"
     # Confirm binds v2 exactly; execution writes v2's value.
-    task = service.confirm(task.task_id, "j.okafor")
+    task = service.confirm(task.task_id, "s.hale")
     assert task.confirmed_version == 2
     task = service.execute(task.task_id, "offline")
     assert task.status == TaskStatus.VERIFIED
@@ -134,7 +134,7 @@ def test_amendment_of_credit_amount_flows_to_the_memo(service):
         ("amount", "120.00", "150.00")]  # normalised to plan form
     assert plan.steps[0].fields["amount"] == "150.00"
     assert "150.00" in plan.steps[0].instruction
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     task = service.execute(task.task_id, "offline")
     assert task.status == TaskStatus.VERIFIED
     memo = service.store.list_records("credit_memos")[0]
@@ -143,7 +143,7 @@ def test_amendment_of_credit_amount_flows_to_the_memo(service):
 
 def test_confirmed_plan_cannot_be_amended(service):
     task = service.intake(CREDIT, "j.okafor")
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     with pytest.raises(GateError):
         service.amend(task.task_id, "j.okafor",
                       [AmendChangeIn(seq=1, fields={"amount": "150.00"})])
@@ -190,7 +190,7 @@ def test_noop_amendment_is_refused(service):
 
 def test_reject_is_terminal_and_blocks_execution(service):
     task = service.intake(CREDIT, "j.okafor")
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     task = service.reject(task.task_id, "j.okafor")
     assert task.status == TaskStatus.REJECTED
     with pytest.raises(GateError):
@@ -240,7 +240,7 @@ def test_diff_plans_added_and_removed_steps():
 def test_record_change_between_plan_and_execute_is_stale(service):
     task = service.intake("update customer 2041 phone to 555-0134",
                           "j.okafor")
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     # A human edits the same record in the console meanwhile.
     apply_field_change(service.store, "customers", "2041", "city",
                        "Bath")
@@ -261,7 +261,7 @@ def test_record_change_between_plan_and_execute_is_stale(service):
 
 def test_stale_refusal_also_guards_live_arming(service):
     task = service.intake("mark order 1032 as shipped", "j.okafor")
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     apply_field_change(service.store, "orders", "1032", "carrier",
                        "FedEx")
     with pytest.raises(GateError):
@@ -272,7 +272,7 @@ def test_stale_refusal_also_guards_live_arming(service):
 def test_replan_after_stale_supersedes_and_executes(service):
     task = service.intake("update customer 2041 phone to 555-0134",
                           "j.okafor")
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     apply_field_change(service.store, "customers", "2041", "city",
                        "Bath")
     with pytest.raises(GateError):
@@ -285,7 +285,7 @@ def test_replan_after_stale_supersedes_and_executes(service):
     v2 = service.get_plan(task.task_id, 2)
     assert v2.superseded is False
     assert v2.preconditions  # re-derived from the records as they stand
-    task = service.confirm(task.task_id, "j.okafor")
+    task = service.confirm(task.task_id, "s.hale")
     assert task.confirmed_version == 2
     task = service.execute(task.task_id, "offline")
     assert task.status == TaskStatus.VERIFIED
@@ -302,7 +302,7 @@ def test_replan_requires_stale(service):
 def test_unrelated_record_change_does_not_stale_the_plan(service):
     task = service.intake("update customer 2041 phone to 555-0134",
                           "j.okafor")
-    service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "s.hale")
     apply_field_change(service.store, "customers", "2042", "city",
                        "Hull")  # a record this plan does not touch
     task = service.execute(task.task_id, "offline")
@@ -336,7 +336,7 @@ def test_amend_diff_and_versions_over_http(client):
     assert diff["step_diffs"][0]["changes"][0]["field"] == "amount"
     # The amended version is what confirmation binds and execution runs.
     confirmed = client.post(f"/api/tasks/{tid}/confirm",
-                            json={"operator": "j.okafor"})
+                            json={"operator": "s.hale"})
     assert confirmed.json()["confirmed_version"] == 2
     done = client.post(f"/api/tasks/{tid}/execute",
                        json={"driver": "offline"})
@@ -349,7 +349,7 @@ def test_amend_confirmed_task_over_http_is_409(client):
     created = client.post("/api/tasks", json={
         "text": CREDIT, "operator": "j.okafor"})
     tid = created.json()["task"]["task_id"]
-    client.post(f"/api/tasks/{tid}/confirm", json={"operator": "j.okafor"})
+    client.post(f"/api/tasks/{tid}/confirm", json={"operator": "s.hale"})
     res = client.post(f"/api/tasks/{tid}/amend", json={
         "operator": "j.okafor",
         "changes": [{"seq": 1, "fields": {"amount": "150.00"}}]})
@@ -374,7 +374,7 @@ def test_stale_execute_over_http_is_409_and_replan_recovers(client):
     created = client.post("/api/tasks", json={
         "text": "mark order 1032 as shipped", "operator": "j.okafor"})
     tid = created.json()["task"]["task_id"]
-    client.post(f"/api/tasks/{tid}/confirm", json={"operator": "j.okafor"})
+    client.post(f"/api/tasks/{tid}/confirm", json={"operator": "s.hale"})
     client.put("/api/console/orders/1032", json={
         "fields": {"carrier": "FedEx"}})  # a human edit in the console
     res = client.post(f"/api/tasks/{tid}/execute",
@@ -384,6 +384,6 @@ def test_stale_execute_over_http_is_409_and_replan_recovers(client):
     assert detail["task"]["status"] == "STALE"
     assert detail["task"]["stale_records"] == ["orders 1032"]
     replanned = client.post(f"/api/tasks/{tid}/replan",
-                            json={"operator": "j.okafor"})
+                            json={"operator": "s.hale"})
     assert replanned.json()["task"]["status"] == "PLANNED"
     assert replanned.json()["plan"]["version"] == 2
