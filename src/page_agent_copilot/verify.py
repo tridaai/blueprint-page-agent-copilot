@@ -2,10 +2,12 @@
 evidence.
 
 After execution — by either driver — the shell re-reads the record
-state and diffs it against the approved plan field by field. The
-agent's own report of what it did is never consulted here. An exact
-match is the only path to VERIFIED; every mismatch is named in a
-FieldDiff and the task lands in DISCREPANCY.
+state and diffs it against the approved plan field by field, step
+by step in plan order. The agent's own report of what it did is
+never consulted here. An exact match across every step is the only
+path to VERIFIED; every mismatch is named in a FieldDiff carrying
+its step's seq, and the task lands in DISCREPANCY — a plan whose
+second step failed is a discrepancy, never a partial success.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ def verify_plan(store: Store, plan: Plan,
                 actual = str(record.get(step.field, ""))
             if actual != step.value:
                 diffs.append(FieldDiff(
+                    seq=step.seq,
                     record_kind=step.record_kind,
                     record_id=step.record_id or "",
                     field=step.field or "",
@@ -40,6 +43,7 @@ def verify_plan(store: Store, plan: Plan,
                 actual = str(record.get(field, "")) if record else None
                 if actual != planned:
                     diffs.append(FieldDiff(
+                        seq=step.seq,
                         record_kind=step.record_kind,
                         record_id=created_id or "(not created)",
                         field=field, planned=planned, actual=actual))
