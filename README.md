@@ -123,6 +123,28 @@ evidence.
   is marked **BROKEN** in the library, computed on read (the
   eval runner stores no results, so health is the examples,
   re-derived at the moment of asking).
+- **Batch work, without bulk decisions** — the desk's work
+  arrives as a list, so a **batch** groups the tasks submitted
+  together: task texts and template instantiations in one
+  submission, in order, under one creator. Creating a batch
+  states each member through the ordinary intake, so every
+  gate applies to each member exactly as to a task stated
+  alone — and a member that refuses at plan time stays in the
+  batch with its reason showing, never silently dropped. What
+  a batch never does is decide: there is **no batch confirm,
+  no batch execute, no bulk act of any kind**, because a
+  confirmation binds one plan version on one task, given by
+  one named second person. Instead the batch offers a **run
+  sheet** — each member's state, the next act it needs, and
+  who may take it — and a **report** folded from the member
+  records: counts by state, the failures with their steps
+  named, the discrepancies still open, and the total credited
+  across verified members, read from their verification
+  reports rather than their plans. The batch record stores no
+  status of its own; complete means every member stands in a
+  terminal state, folded fresh on every read. Members share
+  nothing but the batch id — one member going stale or failing
+  never touches another's lifecycle.
 - **Two drivers, one step interface** — the real `page-agent`
   package in the operator's browser (live), and a deterministic
   offline driver (tests, evals, fallback), labelled honestly in
@@ -337,7 +359,22 @@ version used either way. Library acts are recorded in their own
 audit scope at `GET /api/templates-audit` (`template_published`,
 `template_refused`, `template_instantiation_refused`), and each
 instantiated task's own trail carries `template_instantiated`
-with the template, the version, and the slot values.
+with the template, the version, and the slot values. A batch
+is created at `POST /api/batches` — the only batch write that
+exists — and read at `GET /api/batches`,
+`GET /api/batches/{id}`, `GET /api/batches/{id}/run-sheet`
+(each member's state, next act, and who may take it), and
+`GET /api/batches/{id}/report` (counts by state, the credited
+total from the verified members' reports, the discrepancies
+and failures still open, and the members still owing acts, or
+the batch's completeness). There is no batch decision route
+to call: the plausible bulk paths (`POST
+/api/batches/{id}/confirm`, `.../execute`) answer 404/405,
+and the test suite asserts against the route table that every
+decision route names a task id. Batch acts are recorded in
+their own scope at `GET /api/batches-audit` (`batch_created`,
+`batch_refused`), and each member task's trail carries
+`batch_member` naming the batch and its position in it.
 
 ## Layout
 
@@ -353,6 +390,8 @@ src/page_agent_copilot/
                   action classes, the strict loader, the checks
   templates.py    the task library: templates as governed records —
                   pattern, slots, pinned examples, the strict loader
+  batches.py      batches: submissions as governed records — member
+                  order, terminal states, the next-act derivation
   drivers.py      the step interface + the deterministic offline driver
   reads.py        the console read surface: the reads the API serves,
                   and the only path verification re-reads through
@@ -368,7 +407,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (46 cases)
+evals/            the scripted-task gate (49 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -376,9 +415,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 173 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 191 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 46/46 cases: happy paths diffed exactly (including
+make evals   # 49/49 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -417,6 +456,17 @@ make evals   # 46/46 cases: happy paths diffed exactly (including
              # instantiation, an operator refused at publish, a
              # policy-breaking slot value refused in policy's own
              # words, and every template's pinned examples green
+             # — and batch work: a mixed submission (a clean
+             # credit, an over-cap refusal kept with its reason,
+             # a template member, a multi-record member) whose
+             # run sheet names each member's next act, completed
+             # by per-task acts alone, with the report
+             # reconciling against the credited total recomputed
+             # from the members' verification reports; one
+             # member going stale while another verifies in the
+             # same batch; and a lying bridge whose member
+             # credits nothing until its own recorded exit
+             # closes it
 ```
 
 ## Honest status

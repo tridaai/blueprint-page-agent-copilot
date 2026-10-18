@@ -189,6 +189,53 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   gate and marks the version broken in the library by name and
   version, which is the seed the template regression gate
   (round 19) grows from.
+- **Batches** (`batches.py`, `service.py`) — work submitted
+  together, as one governed record (kind `batches`), following
+  the same records pattern: the record is written once at
+  creation and never edited, and its administration keeps its
+  own reserved audit scope (`batches`). A submission is a list
+  of members in order, each a task text or a template with its
+  slots; creating the batch states every member through the
+  ordinary doors — `intake` for a text, `instantiate_template`
+  (which itself intakes) for a template member — so the role
+  rules and policy govern each member exactly as if it had been
+  stated alone, and the batch confers no permission of its own
+  (a viewer's batch is a batch of `role_cannot_plan` refusals).
+  A member that refuses stays in the batch with its refusal: a
+  plan-time refusal is the member's REFUSED task, and a template
+  member whose slots fail validation — which creates no task —
+  carries instantiation's refusal on the member record itself.
+  A malformed submission (no members; a member naming both a
+  text and a template, or neither) is refused whole as a
+  `BatchError` (HTTP 422, `batch_refused`) before anything is
+  stated. The record deliberately stores **no status**: the
+  batch's two reads are folds over the member records, computed
+  at the moment of asking. The **run sheet** joins each member
+  with its task's live state and the next act that state is owed
+  (`next_act_for`, one derivation shared by every read: confirm
+  for PLANNED — naming the planner, whom confirmation must not
+  be — execute for CONFIRMED, re-plan for STALE, resume/restart/
+  abandon for EXECUTION_FAILED, corrective-or-accept for
+  DISCREPANCY, nothing for a terminal state, with the ending
+  named). The **report** folds counts by state, the failures
+  with their steps and errors, the discrepancies still open
+  with their diffs and correction chains, the refusals with
+  their reasons, and the **credited total**: summed from the
+  VERIFIED members' stored verification reports — the
+  credit-memo `amount` field checks the re-read passed, never
+  the plans' values, so a member in DISCREPANCY contributes
+  nothing whatever its plan promised. A batch is complete
+  exactly when every member stands in a terminal state
+  (`TERMINAL_STATUSES`: VERIFIED, DISCREPANCY_ACCEPTED, REFUSED,
+  REJECTED, ABANDONED — DISCREPANCY is not terminal; it still
+  owes an exit), and the report names the members still owing
+  acts instead of merely saying so. There is no batch lifecycle
+  in the state machine below: batches add no task transitions,
+  and members share nothing but the batch id (stamped on the
+  task as `batch_id`) — one member's staleness, failure, or
+  discrepancy cannot touch another's plan, confirmation, or
+  execution, which the tests and evals prove by driving members
+  of one batch to different fates on one store.
 - **State machine** (`service.py`) — DRAFT → PLANNED → CONFIRMED →
   VERIFIED / DISCREPANCY, with REFUSED as the plan-time terminal
   and DISCREPANCY_ACCEPTED as the deviation terminal (reached only
@@ -418,7 +465,15 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   code), and `template_instantiation_refused` (the template, the
   version, the code, the reason); and on the task itself,
   `template_instantiated` (the template, the exact version used,
-  the version requested, and the slot values).
+  the version requested, and the slot values). Batches add:
+  under the `batches` scope, `batch_created` (the members as
+  creation left them — task ids in submission order, and the
+  refusal a member carries when no task was created) and
+  `batch_refused` (a malformed submission, with its code); and
+  on each member task, `batch_member` (the batch id, the
+  member's position, and how it was submitted) — so a task's
+  trail names the list it arrived in, and the batch's scope
+  names every task it stated.
 
 ## The PageAgent API, as verified
 
@@ -517,6 +572,18 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   deleted, so the trail it left stays attributable: the
   attribution check resolving a deactivated name is a pass, not a
   finding.
+- **Grouping is not authority.** A batch organises attention and
+  takes no acts: there is no batch confirmation, batch
+  execution, or batch decision route at all — the route table
+  itself is the proof (batch routes are creation plus reads;
+  every decision route names a task id, and the plausible bulk
+  paths answer 404/405). The reason is the gate's shape: a
+  confirmation binds one plan version on one task, given by one
+  named second person. A "confirm all" would have to blur whose
+  yes approved which values, so the shell does not offer it —
+  the run sheet shows the desk exactly which member needs which
+  act from whom, and each act is then taken on that task,
+  recorded as that person's.
 
 ## Production profile
 
