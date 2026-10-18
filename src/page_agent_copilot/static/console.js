@@ -176,10 +176,13 @@
   }
 
   // The per-operator report and the attribution check, both
-  // folded from the audit trail by the shell.
+  // folded from the audit trail by the shell. The budget read
+  // folds from the attempt records the same way: steps consumed
+  // and exhaustions per operator, never from counters.
   async function refreshReport() {
-    const [report, check] = await Promise.all([
-      api("/api/operators/report"), api("/api/attribution")]);
+    const [report, check, budget] = await Promise.all([
+      api("/api/operators/report"), api("/api/attribution"),
+      api("/api/operators/budget")]);
     $("attribution-line").textContent =
       `Attribution check: ${check.checked} acts scanned — ` +
       (check.ok
@@ -199,6 +202,10 @@
         ? " (" + Object.entries(r.refusals_by_code)
             .map(([k, v]) => `${k} ×${v}`).join(", ") + ")"
         : "")).join("\n");
+    $("operator-budget").textContent = budget.map((b) =>
+      `${b.operator} — attempts ${b.attempts_run} · tasks executed ` +
+      `${b.tasks_executed} · steps consumed ${b.steps_consumed} · ` +
+      `budget exhaustions ${b.budget_exhaustions}`).join("\n");
   }
 
   // The task library, rendered from the same governed records

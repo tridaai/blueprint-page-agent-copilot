@@ -505,6 +505,13 @@ def create_app(settings: Optional[Settings] = None,
         # the refusals each name received, by code.
         return service.operator_report()
 
+    @app.get("/api/operators/budget")
+    def operator_budget():
+        # Per-operator execution spend folded from the attempt
+        # records: attempts run, tasks executed, steps consumed,
+        # and the attempts the shell stopped for budget.
+        return service.budget_report()
+
     @app.get("/api/attribution")
     def attribution():
         # The completeness check over the whole audit trail:
@@ -657,14 +664,18 @@ def create_app(settings: Optional[Settings] = None,
 
         Field names follow the library's own LLMConfig (verified
         against page-agent@1.12.4): baseURL and model required,
-        apiKey optional."""
+        apiKey optional. `maxSteps` is the shell's governed
+        execution-step ceiling (Policy) served under the library's
+        name — one source of truth for the number, so the in-page
+        agent's own step budget and the shell's per-attempt budget
+        are the same figure, set in one place."""
         cfg = settings.page_agent
         return {
             "model": cfg.model,
             "baseURL": cfg.base_url,
             "apiKey": cfg.api_key,
             "language": cfg.language,
-            "maxSteps": cfg.max_steps,
+            "maxSteps": settings.policy.max_execution_steps,
             "configured": cfg.configured,
         }
 
