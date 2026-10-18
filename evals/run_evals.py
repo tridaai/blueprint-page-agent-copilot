@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -2270,6 +2271,199 @@ def _():
     untraced = _plan_value_traces(
         svc, task, svc.get_plan(task.task_id))
     expect(untraced == [], f"untraced values {untraced}")
+
+
+# -- Round 15: observability ---------------------------------------
+# The trace, the taxonomy, and the daily digest: three reads
+# folded from the records the shell already keeps. The trace
+# case grades the exact step sequence of a two-attempt
+# execution; the digest case scripts a day's mix and grades
+# the stored snapshot against a recount taken from the task
+# records by a separate path; the taxonomy case pins one label
+# per ending class.
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+@case("observability: the trace grades a two-attempt execution "
+      "exactly")
+def _():
+    svc = fresh()
+    task = svc.intake(SHIP3, "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline",
+                       fail={2: "element not found: ship date"})
+    expect(task.status == TaskStatus.EXECUTION_FAILED,
+           f"status {task.status}")
+    task = svc.resume_execution(task.task_id)
+    expect(task.status == TaskStatus.VERIFIED,
+           f"status {task.status}")
+    trace = svc.task_trace(task.task_id)
+    expect([a["mode"] for a in trace["attempts"]]
+           == ["execute", "resume"], f"modes {trace['attempts']}")
+    expect([a["outcome"] for a in trace["attempts"]]
+           == ["failed", "completed"], "attempt outcomes")
+    sequence = [(a["number"], e["seq"], e["ok"])
+                for a in trace["attempts"] for e in a["events"]
+                if e["type"] == "step"]
+    expect(sequence == [(1, 1, True), (1, 2, False),
+                        (2, 2, True), (2, 3, True)],
+           f"step sequence {sequence}")
+    expect(all(a["duration_seconds"] is not None
+               and a["duration_seconds"] >= 0
+               for a in trace["attempts"]),
+           "an attempt carries no wall clock from its stamps")
+    expect(trace["attempts"][0]["error"]
+           == "element not found: ship date",
+           "the failed attempt's error is not verbatim")
+    expect(trace["ending"] == {"label": "verified", "detail": {}},
+           f"ending {trace['ending']}")
+    expect(trace["verification"]["ok"] is True,
+           "the trace's verification summary is wrong")
+
+
+@case("observability: the day's digest matches an independent "
+      "recount")
+def _():
+    svc = fresh_with(Policy(max_execution_steps=2))
+    credited = svc.intake(CREDIT, "op")
+    svc.confirm(credited.task_id, "s.hale")
+    svc.execute(credited.task_id, "offline")
+    discrepancy = svc.intake("mark order 1036 as packed", "op")
+    svc.confirm(discrepancy.task_id, "s.hale")
+    svc.execute(discrepancy.task_id, "offline",
+                tamper={1: "placed"})
+    svc.intake("raise a credit memo for invoice 4471, reason "
+               "damaged goods, $900", "op")
+    exhausted = svc.intake(SHIP3, "op")
+    svc.confirm(exhausted.task_id, "s.hale")
+    svc.execute(exhausted.task_id, "offline")
+    svc.resume_execution(exhausted.task_id)
+    digest = svc.generate_digest(_today(), "s.hale")
+    # The recount: statuses off the task records, credits off
+    # the stored verification reports, attempts off the attempt
+    # records — none of it through the digest's own fold.
+    mine = svc.list_tasks()
+    by_status = {}
+    for t in mine:
+        by_status[t.status.value] = by_status.get(
+            t.status.value, 0) + 1
+    expect(digest["tasks_total"] == 4
+           and digest["counts_by_status"] == by_status,
+           f"counts {digest['counts_by_status']} vs {by_status}")
+    expect(digest["counts_by_taxonomy"] == {
+        "verified": 2, "discrepancy": 1, "refused_at_plan": 1},
+        f"taxonomy {digest['counts_by_taxonomy']}")
+    expect(digest["refusals_by_code"]
+           == {"credit_above_cap": 1},
+           f"refusal codes {digest['refusals_by_code']}")
+    total = 0.0
+    for t in mine:
+        if t.status != TaskStatus.VERIFIED:
+            continue
+        for check in svc.get_verification(
+                t.task_id).field_checks:
+            if (check.record_kind == "credit_memos"
+                    and check.field == "amount"
+                    and check.verdict == "match"):
+                total += float(check.actual)
+    expect(digest["total_credited"] == f"{total:.2f}" == "120.00",
+           f"credited {digest['total_credited']}")
+    expect(digest["budget_exhaustions"]["count"] == 1
+           and digest["budget_exhaustions"]["task_ids"]
+           == [exhausted.task_id], "exhaustions miscounted")
+    expect(digest["discrepancies"]["open"]
+           == [discrepancy.task_id]
+           and digest["discrepancies"]["accepted"] == [],
+           "discrepancies miscounted")
+    attempts = [a for t in mine
+                for a in svc.get_attempts(t.task_id)]
+    expect(digest["executions"]["attempts_run"] == len(attempts)
+           and digest["executions"]["steps_consumed"]
+           == sum(len(a.steps) for a in attempts),
+           "execution counts drift from the attempt records")
+    # Regenerating the day replaces the snapshot, version up,
+    # counts unchanged.
+    again = svc.generate_digest(_today(), "s.hale")
+    expect(again["version"] == 2
+           and again["counts_by_status"]
+           == digest["counts_by_status"],
+           "regeneration did not bump the version cleanly")
+
+
+@case("observability: taxonomy pins name every ending")
+def _():
+    svc = fresh()
+    refused = svc.intake(
+        "raise a credit memo for invoice 4471, reason damaged "
+        "goods, $900", "op")
+    ending = svc.task_ending(refused)
+    expect(ending["label"] == "refused_at_plan"
+           and ending["detail"]["code"] == "credit_above_cap",
+           f"refused ending {ending}")
+    planned = svc.intake(CREDIT, "op")
+    expect(svc.task_ending(planned)["label"] == "in_progress",
+           "a planned task is not in progress")
+    rejected = svc.intake(CREDIT, "op")
+    svc.reject(rejected.task_id, "s.hale")
+    expect(svc.task_ending(
+        svc.get_task(rejected.task_id))["label"] == "rejected",
+        "a rejected plan is mislabelled")
+    # The stale ending: the basis moves after confirmation.
+    stale = svc.intake(SHIP3, "op")
+    svc.confirm(stale.task_id, "s.hale")
+    apply_field_change(svc.store, "orders", "1032", "carrier",
+                       "UPS")
+    try:
+        svc.execute(stale.task_id, "offline")
+        expect(False, "a stale execution ran")
+    except GateError:
+        pass
+    ending = svc.task_ending(svc.get_task(stale.task_id))
+    expect(ending["label"] == "stale"
+           and ending["detail"]["records"] == ["orders 1032"],
+           f"stale ending {ending}")
+    # Driver error, then abandonment over the same failure.
+    failed = svc.intake(SHIP3, "op")
+    svc.confirm(failed.task_id, "s.hale")
+    svc.execute(failed.task_id, "offline", fail={2: "timeout"})
+    ending = svc.task_ending(svc.get_task(failed.task_id))
+    expect(ending["label"] == "execution_failed"
+           and ending["detail"]["subreason"] == "driver_error",
+           f"failed ending {ending}")
+    svc.abandon(failed.task_id, "op", "re-keyed by hand")
+    ending = svc.task_ending(svc.get_task(failed.task_id))
+    expect(ending["label"] == "abandoned"
+           and ending["detail"]["subreason"] == "driver_error",
+           f"abandoned ending {ending}")
+    # A discrepancy, accepted: the diffs survive the acceptance.
+    disc = svc.intake("mark order 1036 as packed", "op")
+    svc.confirm(disc.task_id, "s.hale")
+    svc.execute(disc.task_id, "offline", tamper={1: "placed"})
+    ending = svc.task_ending(svc.get_task(disc.task_id))
+    expect(ending["label"] == "discrepancy"
+           and ending["detail"]["diffs"][0]["planned"]
+           == "packed", f"discrepancy ending {ending}")
+    svc.accept_deviation(disc.task_id, "s.hale",
+                         "packed by hand on the floor")
+    ending = svc.task_ending(svc.get_task(disc.task_id))
+    expect(ending["label"] == "discrepancy_accepted"
+           and ending["detail"]["accepted_by"] == "s.hale",
+           f"accepted ending {ending}")
+    # Clarification exhaustion is its own class, not a refusal.
+    svc = fresh()
+    setup = svc.intake(CREDIT, "op")
+    svc.confirm(setup.task_id, "s.hale")
+    svc.execute(setup.task_id, "offline")
+    task = svc.intake(
+        "raise a credit memo for the open invoice, reason "
+        "damaged goods and mark invoice 4472 as o", "op")
+    task = svc.answer_clarification(task.task_id, "op", "4471")
+    task = svc.answer_clarification(task.task_id, "op", "120.00")
+    expect(svc.task_ending(task)["label"]
+           == "clarification_exhausted",
+           "exhaustion is not its own taxonomy class")
 
 
 def main() -> int:
