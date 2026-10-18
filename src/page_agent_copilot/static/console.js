@@ -156,8 +156,23 @@
     });
   }
 
+  async function renderDiff(taskId, fromV, toV, div) {
+    const diff = await api(
+      `/api/tasks/${taskId}/plan-diff?from_version=${fromV}&to_version=${toV}`);
+    if (!diff.step_diffs.length) {
+      div.textContent = `Plan v${fromV} → v${toV}: no differences.`;
+      return;
+    }
+    div.textContent = diff.step_diffs.map((sd) => {
+      if (sd.change !== "changed") return `step ${sd.seq}: ${sd.change}`;
+      return sd.changes.map((c) =>
+        `step ${sd.seq} · ${c.field}: '${c.old ?? ""}' → '${c.new ?? ""}'`
+      ).join("\n");
+    }).join("\n");
+  }
+
   async function openTask(taskId) {
-    const { task, plan } = await api("/api/tasks/" + taskId);
+    const { task, plan, plan_versions } = await api("/api/tasks/" + taskId);
     current.task = task;
     $("task-detail").hidden = false;
     $("task-id-label").textContent = task.task_id;
@@ -165,11 +180,17 @@
       `<span class="chip ${task.status}">${task.status}</span>`;
     $("task-refusal").textContent =
       task.status === "REFUSED" ? task.refusal_reason : "";
+    $("task-stale").textContent = task.status === "STALE"
+      ? "Stale — these records changed after the plan was derived: " +
+        (task.stale_records || []).join(", ") +
+        ". Nothing ran. Re-plan to derive a fresh version."
+      : "";
     const planDiv = $("task-plan");
     if (plan) {
       planDiv.innerHTML = "";
       const head = document.createElement("p");
-      head.innerHTML = `<b>Plan v${plan.version}</b> — ${plan.summary}`;
+      head.innerHTML = `<b>Plan v${plan.version}</b>` +
+        (plan.superseded ? " (superseded)" : "") + ` — ${plan.summary}`;
       planDiv.appendChild(head);
       const ol = document.createElement("ol"); ol.className = "steps";
       plan.steps.forEach((s) => {
@@ -179,10 +200,42 @@
       });
       planDiv.appendChild(ol);
     } else { planDiv.innerHTML = ""; }
+    // Version history + a compare view between any two versions.
+    const plansDiv = $("task-plans");
+    plansDiv.innerHTML = "";
+    const versions = plan_versions || (plan ? [plan.version] : []);
+    if (versions.length > 1) {
+      const row = document.createElement("div");
+      row.className = "field";
+      const label = document.createElement("label");
+      label.textContent = "Plan versions";
+      const opts = versions.map((v) => `<option value="${v}">v${v}</option>`).join("");
+      row.innerHTML = "";
+      const fromSel = document.createElement("select");
+      fromSel.innerHTML = opts;
+      fromSel.value = String(versions[versions.length - 2]);
+      const toSel = document.createElement("select");
+      toSel.innerHTML = opts;
+      toSel.value = String(versions[versions.length - 1]);
+      const btn = document.createElement("button");
+      btn.className = "act secondary"; btn.textContent = "Compare versions";
+      const diffDiv = document.createElement("div");
+      diffDiv.className = "diff"; diffDiv.style.marginTop = "8px";
+      btn.addEventListener("click", () =>
+        renderDiff(taskId, fromSel.value, toSel.value, diffDiv));
+      row.appendChild(label); row.appendChild(fromSel);
+      row.appendChild(toSel); row.appendChild(btn);
+      plansDiv.appendChild(row); plansDiv.appendChild(diffDiv);
+      renderDiff(taskId, fromSel.value, toSel.value, diffDiv);
+    }
+    $("task-amend").hidden = task.status !== "PLANNED";
     $("task-confirm").disabled = task.status !== "PLANNED";
     const canRun = task.status === "CONFIRMED" && !task.driver;
     $("task-run-offline").disabled = !canRun;
     $("task-run-live").disabled = !canRun;
+    $("task-reject").disabled =
+      !(task.status === "PLANNED" || task.status === "CONFIRMED");
+    $("task-replan").disabled = task.status !== "STALE";
     const audit = await api("/api/tasks/" + taskId + "/audit");
     $("task-audit").textContent = audit.map((a) =>
       `${a.ts}  ${a.event}  by ${a.actor}  ${JSON.stringify(a.detail)}`).join("\n");
@@ -212,6 +265,35 @@
     await api(`/api/tasks/${current.task.task_id}/execute`,
       json("POST", { driver: "offline" }));
     refreshAll(); openTask(current.task.task_id);
+  });
+  $("task-reject").addEventListener("click", async () => {
+    await api(`/api/tasks/${current.task.task_id}/reject`,
+      json("POST", { operator: $("task-operator").value || "operator" }));
+    refreshTasks(); openTask(current.task.task_id);
+  });
+  $("task-replan").addEventListener("click", async () => {
+    await api(`/api/tasks/${current.task.task_id}/replan`,
+      json("POST", { operator: $("task-operator").value || "operator" }));
+    refreshTasks(); openTask(current.task.task_id);
+  });
+  $("task-amend-btn").addEventListener("click", async () => {
+    const seq = parseInt($("amend-seq").value, 10);
+    const field = $("amend-field").value.trim();
+    const value = $("amend-value").value;
+    const change = field ? { seq, fields: { [field]: value } }
+                         : { seq, value };
+    const res = await fetch(
+      `/api/tasks/${current.task.task_id}/amend`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          operator: $("task-operator").value || "operator",
+          changes: [change] }),
+      });
+    const body = await res.json().catch(() => ({}));
+    $("amend-note").textContent = res.ok
+      ? `Amended — plan v${body.plan.version} now awaits confirmation.`
+      : (body.detail || `Amendment refused (${res.status})`);
+    refreshTasks(); openTask(current.task.task_id);
   });
 
   async function refreshAll() {
