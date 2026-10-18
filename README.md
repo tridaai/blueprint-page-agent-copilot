@@ -49,7 +49,27 @@ evidence.
 - **Governed task shell** — intake → plan → confirm gate → execute →
   verify → audit, with the state machine enforced in code against
   the store (DRAFT → PLANNED → CONFIRMED → VERIFIED / DISCREPANCY /
-  REFUSED). Executing an unconfirmed plan is refused (HTTP 409).
+  REFUSED, plus STALE and REJECTED below). Executing an unconfirmed
+  plan is refused (HTTP 409).
+- **Multi-record plans** — one task can compose one plan across
+  records: a credit memo with the invoice settled in the same plan,
+  an order shipped with its date and carrier, status changes naming
+  two records. Steps run in plan order; verification diffs every
+  step, and a failed step is named by its number — a plan is never
+  a partial success.
+- **Plan amendments and diffs** — while a plan awaits confirmation,
+  an operator may amend its values; every amended value passes the
+  same policy checks as planning, the amendment becomes plan
+  version n+1 with its field-level diff recorded, and confirmation
+  is then owed on the new version (a confirmation binds the exact
+  version it approved). Any two versions can be diffed, in the API
+  and in the console. A confirmed plan cannot be amended at all —
+  the route past it is rejection and a fresh task.
+- **Staleness protection** — every plan records the state of the
+  records it was derived from. If any of those records changes
+  before execution, execution refuses, the task parks in STALE
+  naming the changed records, and nothing is written; a re-plan
+  derives a fresh version from the records as they now stand.
 - **Two drivers, one step interface** — the real `page-agent`
   package in the operator's browser (live), and a deterministic
   offline driver (tests, evals, fallback), labelled honestly in
@@ -81,6 +101,8 @@ No uv? `python3 -m venv .venv && source .venv/bin/activate`, then
 The console seeds itself on first run. Try, in the Copilot tab:
 
 - `raise a credit memo for invoice 4471, reason damaged goods, $120` → plan, confirm, run, VERIFIED
+- `raise a credit memo for invoice 4471, reason damaged goods, $120 and mark invoice 4471 as paid` → one plan, two records
+- `mark order 1032 as shipped, ship date 2026-10-20, carrier DHL` → a three-step plan on one record
 - `mark order 1032 as shipped` → a one-field plan, diffed exactly
 - `raise a credit memo for invoice 4471, reason goodwill, $900` → refused at plan time (cap is $500)
 - `update customer 2041 bank account to …` → refused at plan time (payment field)
@@ -111,34 +133,47 @@ switch. Policy: `COPILOT_CREDIT_CAP` sets the credit cap
 
 ## The governed task grammar
 
-The R1 planner is deterministic — a plan may never invent a value,
+The planner is deterministic — a plan may never invent a value,
 so a task it cannot derive exactly is refused as
 `no_plan_derivable`, not guessed at:
 
 | Task shape | Example |
 |---|---|
 | Credit memo | `raise a credit memo for invoice 4471, reason damaged goods, $120` |
+| Credit memo + settle | `… $120 and mark invoice 4471 as paid` |
 | Order status | `mark order 1032 as shipped` |
+| Ship with details | `mark order 1032 as shipped, ship date 2026-10-20, carrier DHL` |
+| Compound status | `mark order 1036 as packed and mark invoice 4474 as paid` |
 | Invoice status | `mark invoice 4474 as paid` |
 | Customer update | `update customer 2041 phone to 555-0134` |
 
 Plan-time refusals, each with its reason recorded on the task:
 `credit_above_cap`, `payment_field`, `delete_refused`,
 `field_not_plannable`, `value_not_governed`, `record_not_found`,
-`no_plan_derivable`.
+`no_plan_derivable`. Amendments face the same checks, plus
+`step_not_found` and `invalid_amendment` for a change that names
+no step or carries no value.
 
 ## Verification and audit
 
 After either driver runs, `verify.py` compares every planned field
-against the store: SET steps against the record's current value,
-CREATE steps against the created record's fields. The browser
-bridge's step reports are written to the audit as reports — the
-verdict comes from the diff, and an eval case proves a bridge that
-reports success while doing nothing still lands in DISCREPANCY.
+against the store, step by step in plan order: SET steps against
+the record's current value, CREATE steps against the created
+record's fields. A mismatch names its step as well as its field.
+The browser bridge's step reports are written to the audit as
+reports — the verdict comes from the diff, and an eval case proves
+a bridge that reports success while doing nothing still lands in
+DISCREPANCY.
 
 Every task's audit (`GET /api/tasks/{id}/audit`) carries the plan
 version, the confirming operator, each step's before/after values,
-the driver name, and the verification outcome.
+the driver name, and the verification outcome — plus the lifecycle
+of the plan itself: `plan_amended` (with the recorded changes),
+`plan_rejected`, `execution_stale` (with the changed records), and
+`plan_replanned`. Plan versions stay readable
+(`GET /api/tasks/{id}/plans`), and
+`GET /api/tasks/{id}/plan-diff?from_version=1&to_version=2`
+renders the field-level diff between any two of them.
 
 ## Layout
 
@@ -146,7 +181,9 @@ the driver name, and the verification outcome.
 src/page_agent_copilot/
   api.py          FastAPI app: console data, task API, bridge, health
   service.py      the state machine (intake/plan/confirm/execute/verify)
-  planner.py      task text + records -> field-level plan, or a refusal
+  planner.py      task text + records -> field-level plan, or a refusal;
+                  also preconditions and policy-checked amendments
+  plandiff.py     the field-level diff between two plan versions
   policy.py       the plan-time refusals (cap, payment fields, deletes)
   drivers.py      the step interface + the deterministic offline driver
   verify.py       post-state diff against the approved plan
@@ -160,7 +197,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (12 cases)
+evals/            the scripted-task gate (19 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -168,12 +205,15 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 35 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 60 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 12/12 cases: happy paths diffed exactly, all three
-             # plan-time refusals, the unconfirmed-execution gate,
-             # a tampered write caught as DISCREPANCY, and the live
-             # bridge graded on store state, not its report
+make evals   # 19/19 cases: happy paths diffed exactly (including
+             # multi-record plans), all three plan-time refusals,
+             # the unconfirmed-execution gate, a tampered write
+             # caught as DISCREPANCY with its step named, amendment
+             # version binding, a policy-breaking amendment refused,
+             # a stale plan refused before writing anything, and the
+             # live bridge graded on store state, not its report
 ```
 
 ## Honest status

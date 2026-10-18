@@ -37,11 +37,21 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   lands on. There is one mutation path, so there is one thing to
   verify.
 - **Planner** (`planner.py`) — deterministic derivation from task
-  text + records. A plan is a list of field-level steps; each step
-  carries the exact instruction the in-page agent will execute,
-  compiled from the same fields the verifier diffs. Values come from
-  the task or the record, never from page notes and never invented:
-  an underivable task is refused (`no_plan_derivable`).
+  text + records. A plan is a list of field-level steps, possibly
+  across several records (a credit memo with its invoice settled, an
+  order shipped with date and carrier, status changes naming two
+  records); each step carries the exact instruction the in-page
+  agent will execute, compiled from the same fields the verifier
+  diffs. Values come from the task or the record, never from page
+  notes and never invented: an underivable task is refused
+  (`no_plan_derivable`). The planner also captures each plan
+  version's preconditions (content hashes of the records it rests
+  on) and applies amendments, through the same policy checks a
+  fresh plan passes.
+- **Plan diffs** (`plandiff.py`) — steps matched by seq between any
+  two versions of a task's plan: added, removed, or changed with
+  field-level old/new values. Rendered by the API
+  (`/api/tasks/{id}/plan-diff`) and the console's compare view.
 - **Policy** (`policy.py`) — plan-time refusals: deletes
   (`delete_refused`), credits above the governed cap
   (`credit_above_cap`, default $500, `COPILOT_CREDIT_CAP`), payment
@@ -52,7 +62,27 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   VERIFIED / DISCREPANCY, with REFUSED as the plan-time terminal.
   Execution requires CONFIRMED; the check is in the service against
   the store, and the API maps the refusal to HTTP 409. A second
-  execution of a started task is likewise refused.
+  execution of a started task is likewise refused. Around that
+  spine, plan depth adds three acts:
+  - **Amend** (PLANNED only): the amendment becomes plan version
+    n+1 — prior versions are kept and marked superseded — with the
+    field-level changes recorded in the audit; the task stays
+    PLANNED and owes confirmation of the new version. Confirmation
+    binds the exact version it approved (`confirmed_version`), and
+    execution loads that version by number. A confirmed plan cannot
+    be amended at all: the route is **reject** (PLANNED or
+    CONFIRMED → REJECTED, terminal) and a fresh intake.
+  - **Stale check** (at execution): the bound plan's precondition
+    hashes are recomputed against the store. Any mismatch refuses
+    execution before the driver is even assigned; the task parks
+    in STALE with the changed records named, and nothing is
+    written. This applies to both drivers — arming the live bridge
+    on a stale plan is refused the same way.
+  - **Re-plan** (STALE only): the plan is re-derived from the
+    task's original text against the records as they now stand,
+    as a new version with fresh preconditions; the stale version
+    is kept, readable, marked superseded. If the records no longer
+    support a plan, the task is REFUSED with the planner's reason.
 - **Drivers** (`drivers.py`) — one step interface, two drivers:
   - `offline`: applies each step through `records.py`, recording
     before/after field values. Deterministic; the driver of tests
@@ -62,11 +92,13 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
     screen, calls `agent.execute(step.instruction)`, and posts a
     step report. When the last step lands, the shell verifies. The
     report's `ok` is recorded but never consulted by the verifier.
-- **Verifier** (`verify.py`) — for SET steps, the record's current
-  field vs the planned value; for CREATE steps, every planned field
-  vs the created record (found via the id the executing path minted,
-  or `created_for_task` on the live path). Any mismatch → DISCREPANCY
-  with named FieldDiffs.
+- **Verifier** (`verify.py`) — walks the plan's steps in order: for
+  SET steps, the record's current field vs the planned value; for
+  CREATE steps, every planned field vs the created record (found
+  via the id the executing path minted, or `created_for_task` on
+  the live path). Any mismatch → DISCREPANCY with named FieldDiffs,
+  each carrying its step's seq — a plan whose second step failed is
+  a discrepancy, never a partial success.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -75,10 +107,13 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   applied at startup, recorded in `schema_migrations`.
 - **Audit** — one entry per act: `task_created`, `plan_created`
   (plan version + summary), `plan_refused` (policy code + reason),
-  `plan_confirmed` (who), `step_executed` / `step_reported`
-  (before/after, driver), `execution_completed`,
-  `verification_passed` / `verification_failed` (checked count,
-  diffs).
+  `plan_amended` (from/to versions + the recorded field changes),
+  `plan_rejected`, `plan_confirmed` (who, and the exact version
+  bound), `execution_stale` (the changed records),
+  `plan_replanned` (superseded version → new version),
+  `step_executed` / `step_reported` (before/after, driver),
+  `execution_completed`, `verification_passed` /
+  `verification_failed` (checked count, diffs).
 
 ## The PageAgent API, as verified
 
@@ -122,6 +157,18 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   the service on every execution path, including step reports: a
   report against a task that was never armed for the live driver is
   refused.
+- **Confirmation binds a version.** The human confirmed plan v2's
+  values, so v2 is what executes — loaded by number, not by
+  "latest". Amending after confirmation is not a state the machine
+  has; the only paths past a confirmed plan are execution and
+  rejection.
+- **A plan executes on the records it was derived from, or not at
+  all.** Precondition hashes are rechecked at execution for both
+  drivers. A record that changed under a plan — however innocently,
+  by another human doing their job — makes the plan stale, and the
+  copilot refuses rather than writing on a basis that no longer
+  exists. The refusal names the records and preserves the human's
+  edit; re-planning is the deliberate act that moves forward.
 - **Payment fields are read-only everywhere in the copilot's
   world**: plans refuse them, and the console's own save endpoint
   refuses a payload carrying one (HTTP 422).
