@@ -29,6 +29,7 @@ from page_agent_copilot.records import (  # noqa: E402
 )
 from page_agent_copilot.service import CopilotService, GateError  # noqa: E402
 from page_agent_copilot.store import InMemoryStore  # noqa: E402
+from page_agent_copilot.templates import TemplateError  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -879,6 +880,151 @@ def _():
     expect(rows["a.okafor"]["tasks_executed"] == 1
            and rows["s.hale"]["tasks_confirmed"] == 1,
            "the executor and confirmer are not the recorded names")
+
+
+# -- Round 7: the task library ---------------------------------------------
+# Templates as governed records. Instantiation validates the
+# slots, renders the pattern's text, and states it through the
+# ordinary intake — the plan is the planner's own derivation from
+# that text, and the cycle from there is the one a typed task
+# takes. Publishing is a supervisor act; a version's pinned
+# examples are part of this gate, so a planner or policy change
+# that breaks a template fails here, naming it.
+
+ORDER_STATUS_V2 = {
+    "name": "order-status",
+    "pattern": "mark order {order} as {status}",
+    "description": "A single order status change (library wording, v2).",
+    "slots": [
+        {"name": "order", "kind": "record", "record_kind": "orders"},
+        {"name": "status", "kind": "text"},
+    ],
+    "examples": [{
+        "slots": {"order": "1036", "status": "packed"},
+        "task_type": "order_status",
+        "steps": [{"action": "set", "record_kind": "orders",
+                   "record_id": "1036", "field": "status",
+                   "value": "packed"}],
+    }],
+}
+
+
+@case("task library: every seeded template instantiates, plans, and verifies")
+def _():
+    for name in ("credit-memo", "credit-memo-and-settle", "ship-order",
+                 "order-status", "invoice-status", "customer-update"):
+        svc = fresh()
+        template = svc.get_template(name)
+        task = svc.instantiate_template(
+            name, None, dict(template.examples[0].slots), "op")
+        expect(task.status == TaskStatus.PLANNED,
+               f"{name}: status {task.status}")
+        expect(task.template_name == name and task.template_version == 1,
+               f"{name}: template stamp {task.template_name} "
+               f"v{task.template_version}")
+        svc.confirm(task.task_id, "s.hale")
+        task = svc.execute(task.task_id, "offline")
+        expect(task.status == TaskStatus.VERIFIED,
+               f"{name}: status {task.status}")
+    # Exact diffs for two of them, read off the records.
+    svc = fresh()
+    task = svc.instantiate_template(
+        "credit-memo", None,
+        {"invoice": "4471", "reason": "damaged goods", "amount": "120"},
+        "op")
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "offline")
+    memos = svc.store.list_records("credit_memos")
+    expect(len(memos) == 1 and memos[0]["amount"] == "120.00"
+           and memos[0]["reason"] == "damaged goods"
+           and memos[0]["invoice_id"] == "4471", f"memos {memos}")
+    task = svc.instantiate_template(
+        "ship-order", None,
+        {"order": "1032", "ship_date": "2026-10-20", "carrier": "DHL"},
+        "op")
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "offline")
+    order = svc.store.get_record("orders", "1032")
+    expect((order["status"], order["ship_date"], order["carrier"])
+           == ("shipped", "2026-10-20", "DHL"), f"order {order}")
+
+
+@case("task library: an old version instantiates by name and version")
+def _():
+    svc = fresh()
+    svc.publish_template("s.hale", ORDER_STATUS_V2)
+    slots = {"order": "1036", "status": "packed"}
+    old = svc.instantiate_template("order-status", 1, slots, "op")
+    expect(old.template_version == 1
+           and old.status == TaskStatus.PLANNED,
+           f"old version stamp {old.template_version}")
+    new = svc.instantiate_template("order-status", None, slots, "op")
+    expect(new.template_version == 2,
+           f"current version stamp {new.template_version}")
+    entry = [e for e in svc.audit(old.task_id)
+             if e["event"] == "template_instantiated"][0]
+    expect(entry["detail"]["requested_version"] == 1
+           and entry["detail"]["version"] == 1,
+           f"audit detail {entry['detail']}")
+
+
+@case("task library: a slot naming a missing record refuses at instantiation")
+def _():
+    svc = fresh()
+    try:
+        svc.instantiate_template(
+            "credit-memo", None,
+            {"invoice": "9999", "reason": "damaged goods",
+             "amount": "120"}, "op")
+        expect(False, "instantiation accepted a missing record")
+    except TemplateError as err:
+        expect(err.code == "record_not_found", f"code {err.code}")
+    expect(svc.list_tasks() == [], "a task was created from a refusal")
+    refusal = [e for e in svc.template_audit()
+               if e["event"] == "template_instantiation_refused"]
+    expect(refusal and refusal[0]["detail"]["code"] == "record_not_found",
+           f"refusals {refusal}")
+
+
+@case("task library: an operator may not publish; a supervisor may")
+def _():
+    svc = fresh()
+    try:
+        svc.publish_template("op", ORDER_STATUS_V2)
+        expect(False, "an operator published a template version")
+    except GateError:
+        pass
+    published = svc.publish_template("s.hale", ORDER_STATUS_V2)
+    expect(published.version == 2, f"version {published.version}")
+    refusals = [e for e in svc.template_audit()
+                if e["event"] == "template_refused"]
+    expect(refusals
+           and refusals[0]["detail"]["code"] == "role_cannot_administer",
+           f"refusals {refusals}")
+
+
+@case("task library: a policy-breaking slot value fails with policy's own reason")
+def _():
+    svc = fresh()
+    task = svc.instantiate_template(
+        "credit-memo", None,
+        {"invoice": "4471", "reason": "goodwill", "amount": "900"}, "op")
+    expect(task.status == TaskStatus.REFUSED, f"status {task.status}")
+    expect(task.refusal_reason.startswith("credit_above_cap"),
+           f"reason {task.refusal_reason}")
+    expect(task.template_name == "credit-memo"
+           and task.template_version == 1, "template stamp missing")
+
+
+@case("task library: every template's pinned examples run green")
+def _():
+    svc = fresh()
+    templates = svc.list_templates()
+    expect(len(templates) == 6, f"{len(templates)} templates seeded")
+    for template in templates:
+        health = svc.template_health(template)
+        expect(health["ok"],
+               f"{template.name} v{template.version}: {health}")
 
 
 def main() -> int:
