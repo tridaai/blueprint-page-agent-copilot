@@ -40,6 +40,12 @@
         : "";
       return;
     }
+    if (entry.active === false) {
+      $("task-role-line").textContent =
+        `Acting as ${name} — DEACTIVATED: this name may perform no act. ` +
+        `Its unfinished work is orphaned until a supervisor picks it up.`;
+      return;
+    }
     const role = roleData.operators.length
       ? roleData.roles.find((r) => r.name === entry.role) : null;
     $("task-role-line").textContent = role
@@ -55,10 +61,145 @@
       return `${r.name} — may ${rightsLine(r)} | pages: ` +
         `${r.pages.join(", ") || "—"} | fields: ${fields || "—"}`;
     }).join("\n") + "\n" + roleData.operators.map(
-      (o) => `${o.id} → ${o.role}`).join("\n");
+      (o) => `${o.id} → ${o.role}` +
+        (o.active === false ? " (deactivated)" : "")).join("\n");
+    renderDirectory();
     updateRoleLine();
   }
   $("task-operator").addEventListener("input", updateRoleLine);
+
+  // The operator directory, rendered from the same governed data
+  // the API enforces: who holds which role, and who is
+  // deactivated. Directory acts — enrol, assign, deactivate,
+  // reactivate — are supervisor acts, taken as the name at the top
+  // of this screen, and a refusal is shown with the server's
+  // reason, like every other act in this console.
+  async function dirAct(path, opts, note) {
+    const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({}));
+    $(note || "directory-note").textContent = res.ok ? ""
+      : "Refused: " + (data.detail || `${path} -> ${res.status}`);
+    if (res.ok) await refreshAll();
+    return res.ok;
+  }
+  function renderDirectory() {
+    const list = $("directory-list");
+    if (!list) return;
+    list.textContent = roleData.operators.map((o) =>
+      `${o.id} → ${o.role}` +
+      (o.active === false ? " — DEACTIVATED (may perform no act)"
+                          : " — active")).join("\n");
+    const sel = $("enroll-role");
+    if (sel && !sel.options.length) {
+      sel.innerHTML = roleData.roles.map(
+        (r) => `<option value="${r.name}">${r.name}</option>`).join("");
+    }
+    const box = $("directory-actions");
+    box.innerHTML = "";
+    roleData.operators.forEach((o) => {
+      const row = document.createElement("div");
+      row.className = "field";
+      const label = document.createElement("label");
+      label.textContent = o.id;
+      row.appendChild(label);
+      const stateBtn = document.createElement("button");
+      stateBtn.className = "act secondary";
+      stateBtn.textContent = o.active === false
+        ? "Reactivate" : "Deactivate";
+      stateBtn.addEventListener("click", () => dirAct(
+        `/api/operators/${o.id}/` +
+          (o.active === false ? "reactivate" : "deactivate"),
+        json("POST", { operator: asOperator() })));
+      row.appendChild(stateBtn);
+      const roleSel = document.createElement("select");
+      roleSel.innerHTML = roleData.roles.map((r) =>
+        `<option value="${r.name}"` +
+        (r.name === o.role ? " selected" : "") +
+        `>${r.name}</option>`).join("");
+      row.appendChild(roleSel);
+      const assignBtn = document.createElement("button");
+      assignBtn.className = "act secondary";
+      assignBtn.textContent = "Assign role";
+      assignBtn.addEventListener("click", () => dirAct(
+        `/api/operators/${o.id}/role`,
+        json("PUT", { operator: asOperator(),
+                      role: roleSel.value })));
+      row.appendChild(assignBtn);
+      box.appendChild(row);
+    });
+  }
+  $("enroll-btn").addEventListener("click", async () => {
+    const ok = await dirAct("/api/operators", json("POST", {
+      operator: asOperator(),
+      name: $("enroll-name").value,
+      role: $("enroll-role").value,
+    }));
+    if (ok) $("enroll-name").value = "";
+  });
+
+  // Orphaned work: a deactivated operator's unfinished tasks,
+  // listed as they stand. Pickup is a supervisor's recorded act —
+  // the task's operator becomes the supervisor, and the original
+  // planner stays on the task.
+  async function refreshOrphaned() {
+    const items = await api("/api/operators/orphaned");
+    const div = $("orphaned-list");
+    if (!items.length) {
+      div.textContent = "No orphaned work.";
+      return;
+    }
+    div.innerHTML = "";
+    items.forEach((o) => {
+      const row = document.createElement("div");
+      row.className = "field";
+      const label = document.createElement("label");
+      label.textContent = o.task_id;
+      row.appendChild(label);
+      const text = document.createElement("span");
+      text.textContent =
+        `${o.status} — planned by ${o.planned_by}, operator ` +
+        `${o.operator} (deactivated): ${o.text}`;
+      row.appendChild(text);
+      const btn = document.createElement("button");
+      btn.className = "act secondary";
+      btn.textContent = "Pick up (supervisor)";
+      btn.addEventListener("click", async () => {
+        const ok = await actOnTask(
+          `/api/tasks/${o.task_id}/pickup`,
+          { operator: asOperator() },
+          async () => { refreshAll(); openTask(o.task_id); });
+        if (!ok) return;
+      });
+      row.appendChild(btn);
+      div.appendChild(row);
+    });
+  }
+
+  // The per-operator report and the attribution check, both
+  // folded from the audit trail by the shell.
+  async function refreshReport() {
+    const [report, check] = await Promise.all([
+      api("/api/operators/report"), api("/api/attribution")]);
+    $("attribution-line").textContent =
+      `Attribution check: ${check.checked} acts scanned — ` +
+      (check.ok
+        ? "every act is attributable to a directory name or a " +
+          "system component."
+        : `${check.problems.length} act(s) cannot be attributed: ` +
+          check.problems.map((p) =>
+            `${p.event} in ${p.scope} by '${p.actor}' ` +
+            `(${p.problem})`).join("; "));
+    $("operator-report").textContent = report.map((r) =>
+      `${r.operator} (${r.role}${r.active ? "" : ", deactivated"}) — ` +
+      `${r.acts_total} acts · planned ${r.tasks_planned} · ` +
+      `confirmed ${r.tasks_confirmed} · executed ` +
+      `${r.tasks_executed} · refusals received ` +
+      `${r.refusals_received}` +
+      (r.refusals_received
+        ? " (" + Object.entries(r.refusals_by_code)
+            .map(([k, v]) => `${k} ×${v}`).join(", ") + ")"
+        : "")).join("\n");
+  }
 
   function showScreen(name) {
     document.querySelectorAll("nav button").forEach((b) =>
@@ -324,6 +465,35 @@
       btn.addEventListener("click", () => openTask(task.parent_task_id));
       parentDiv.appendChild(btn);
     }
+    // Identity on the task: who planned it stays on the record
+    // even after a pickup; orphaned work (its operator stands
+    // deactivated) offers the pickup act to a supervisor.
+    const pickupDiv = $("task-pickup");
+    pickupDiv.innerHTML = "";
+    if (task.planned_by && task.planned_by !== task.operator) {
+      pickupDiv.appendChild(document.createTextNode(
+        `Planned by ${task.planned_by}; the task now belongs to ` +
+        `${task.operator}` +
+        (task.picked_up_from
+          ? ` (picked up from ${task.picked_up_from}). ` : ". ")));
+    }
+    const owner = roleData.operators.find((o) => o.id === task.operator);
+    const orphanState = ["PLANNED", "CONFIRMED", "STALE",
+      "EXECUTION_FAILED"].includes(task.status);
+    if (owner && owner.active === false && orphanState) {
+      pickupDiv.appendChild(document.createTextNode(
+        `Orphaned work: ${task.operator} is deactivated and this ` +
+        `task still owes them an act. `));
+      const btn = document.createElement("button");
+      btn.className = "act secondary";
+      btn.textContent = "Pick up this task (supervisor)";
+      btn.addEventListener("click", async () => {
+        await actOnTask(`/api/tasks/${task.task_id}/pickup`,
+          { operator: asOperator() },
+          async () => { refreshAll(); openTask(task.task_id); });
+      });
+      pickupDiv.appendChild(btn);
+    }
     $("task-deviation").textContent =
       task.status === "DISCREPANCY_ACCEPTED"
         ? `Deviation accepted by ${task.deviation_accepted_by}: ` +
@@ -511,7 +681,8 @@
   async function refreshAll() {
     await Promise.all([refreshOrders(), refreshCustomers(),
                        refreshInvoices(), refreshTasks(),
-                       refreshRoles()]);
+                       refreshRoles(), refreshOrphaned(),
+                       refreshReport()]);
   }
   refreshAll();
 

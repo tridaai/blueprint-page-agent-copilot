@@ -25,10 +25,14 @@ from .models import (
     AbandonIn,
     AcceptDeviationIn,
     AmendIn,
+    AssignRoleIn,
     ConfirmIn,
     ConsoleSaveIn,
     CorrectiveIn,
+    DirectoryActIn,
+    EnrollOperatorIn,
     ExecuteIn,
+    PickupIn,
     RejectIn,
     ReplanIn,
     RestartIn,
@@ -393,6 +397,58 @@ def create_app(settings: Optional[Settings] = None,
     @app.get("/api/roles-audit")
     def roles_audit():
         return service.role_audit()
+
+    # -- the operator directory --------------------------------------
+    # Enrolment, role assignment, deactivation, and reactivation
+    # are recorded supervisor acts (the acting supervisor rides in
+    # the body); a refusal is a 409 with the service's reason, and
+    # naming a role that does not exist is a 422. A name is never
+    # deleted — deactivation is a state on its entry.
+    @app.post("/api/operators", status_code=201)
+    def enroll_operator(body: EnrollOperatorIn):
+        return service.enroll_operator(
+            body.operator, body.name, body.role)
+
+    @app.put("/api/operators/{name}/role")
+    def assign_operator_role(name: str, body: AssignRoleIn):
+        return service.assign_operator_role(
+            body.operator, name, body.role)
+
+    @app.post("/api/operators/{name}/deactivate")
+    def deactivate_operator(name: str, body: DirectoryActIn):
+        return service.deactivate_operator(body.operator, name)
+
+    @app.post("/api/operators/{name}/reactivate")
+    def reactivate_operator(name: str, body: DirectoryActIn):
+        return service.reactivate_operator(body.operator, name)
+
+    @app.get("/api/operators/orphaned")
+    def orphaned_work():
+        # The unfinished work of deactivated operators — listed,
+        # never reassigned by the listing. Pickup is the act.
+        return service.orphaned_work()
+
+    @app.post("/api/tasks/{task_id}/pickup")
+    def pickup(task_id: str, body: PickupIn):
+        # A supervisor takes over an orphaned task: the task's
+        # operator becomes the supervisor, and the original
+        # planner stays on the record.
+        task = service.pickup_task(task_id, body.operator)
+        return task.model_dump(mode="json")
+
+    @app.get("/api/operators/report")
+    def operator_report():
+        # Per-operator history folded from the audit trail:
+        # acts by kind, tasks planned/confirmed/executed, and
+        # the refusals each name received, by code.
+        return service.operator_report()
+
+    @app.get("/api/attribution")
+    def attribution():
+        # The completeness check over the whole audit trail:
+        # every act's actor must resolve to a directory name or
+        # a named system component. Zero problems is the grade.
+        return service.attribution_check()
 
     @app.post("/api/tasks/{task_id}/steps/{seq}/report")
     def report_step(task_id: str, seq: int, body: StepReportIn):

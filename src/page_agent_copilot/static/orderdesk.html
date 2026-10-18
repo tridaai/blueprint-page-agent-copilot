@@ -150,12 +150,44 @@
         (s.hale). Role definitions are edited only by a supervisor, and every edit is recorded.</p>
       <div id="roles-list" class="diff"></div>
     </div>
+    <div class="panel">
+      <h3>Operator directory</h3>
+      <p class="note">The directory is governed like the roles: names are enrolled, assigned a
+        role, deactivated, and reactivated only by a supervisor, and every one of those acts is
+        recorded in the roles audit. A deactivated name may perform no act at all — every gate
+        refuses it — and it is never deleted, so the work it did stays attributable to it. The
+        buttons below act as the operator named at the top of this screen.</p>
+      <div id="directory-list" class="diff"></div>
+      <div id="directory-actions" style="margin-top:10px;"></div>
+      <div class="field" style="margin-top:10px;"><label for="enroll-name">Enrol name</label>
+        <input id="enroll-name" type="text" placeholder="e.g. a.okafor"></div>
+      <div class="field"><label for="enroll-role">With role</label>
+        <select id="enroll-role"></select></div>
+      <button class="act secondary" id="enroll-btn">Enrol operator (supervisor)</button>
+      <span class="note" id="directory-note"></span>
+    </div>
+    <div class="panel">
+      <h3>Orphaned work</h3>
+      <p class="note">Unfinished work whose operator has been deactivated. It is never
+        auto-reassigned and never deleted: a supervisor picks it up deliberately, as a recorded
+        act, and the original planner stays on the task.</p>
+      <div id="orphaned-list" class="diff">No orphaned work.</div>
+    </div>
+    <div class="panel">
+      <h3>Operator report &amp; attribution</h3>
+      <p class="note">Folded from the audit trail — never from counters. The attribution check
+        scans every act in the trail: each actor must resolve to a directory name (active or
+        deactivated) or to one of the shell's own components.</p>
+      <div id="attribution-line" class="note"></div>
+      <div id="operator-report" class="diff" style="margin-top:8px;"></div>
+    </div>
     <div class="panel" id="task-detail" hidden>
       <h3>Task <span id="task-id-label"></span> — <span id="task-status-chip"></span></h3>
       <div id="task-refusal" class="err"></div>
       <div id="task-stale" class="err"></div>
       <div id="task-failure" class="err"></div>
       <div id="task-parent" class="note"></div>
+      <div id="task-pickup" class="note"></div>
       <div id="task-deviation" class="note"></div>
       <div id="task-abandoned" class="note"></div>
       <div id="task-plan"></div>
