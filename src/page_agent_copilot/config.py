@@ -69,6 +69,15 @@ class Policy:
     # The wall clock one execution attempt may span, in seconds,
     # measured from the attempt's start to each step's landing.
     max_execution_seconds: int = 1800
+    # The clarification patience (round 14): the most DISTINCT
+    # questions derivation may ask one task before a further
+    # ambiguity refuses the task outright, history attached. Two
+    # means: the first question, its answer, one more question —
+    # a third distinct ambiguity lands REFUSED. Being asked again
+    # about a question already asked (the records moved under a
+    # pinned answer, so the choice must be re-made) does not
+    # spend new patience.
+    max_clarifications: int = 2
 
     @classmethod
     def from_env(cls) -> "Policy":
@@ -83,7 +92,10 @@ class Policy:
                 base.max_execution_steps),
             max_execution_seconds=_env_int(
                 "COPILOT_MAX_EXECUTION_SECONDS",
-                base.max_execution_seconds))
+                base.max_execution_seconds),
+            max_clarifications=_env_int(
+                "COPILOT_MAX_CLARIFICATIONS",
+                base.max_clarifications))
 
 
 @dataclass(frozen=True)

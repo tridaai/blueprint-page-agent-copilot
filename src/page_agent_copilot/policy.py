@@ -39,6 +39,29 @@ class PlanRefusal(Exception):
         self.message = message
 
 
+class PlanAmbiguous(Exception):
+    """Derivation cannot finish: the text matches a governed
+    shape in more than one way and the choice is one the records
+    can offer (round 14). Not a refusal — the task parks in
+    AWAITING_CLARIFICATION carrying these options, and derivation
+    re-runs with the chosen value pinned under `key`.
+
+    The options are computed from the records at the moment of
+    asking — never invented, never model-written — and the
+    question is composed in code from them. A pinned value is
+    re-validated against the freshly computed options on every
+    re-derivation: the records may have moved, and a pin that no
+    longer stands is asked about again, never honoured stale."""
+
+    def __init__(self, code: str, key: str, question: str,
+                 options: list[dict]) -> None:
+        super().__init__(question)
+        self.code = code
+        self.key = key
+        self.question = question
+        self.options = options
+
+
 def check_field_change(kind: str, field: str, value: str) -> None:
     """Validate one planned field change. Raises PlanRefusal."""
     if field in PAYMENT_FIELDS:

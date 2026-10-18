@@ -14,6 +14,20 @@ planner can be added behind this same interface later; the plan it
 would have to produce is the same stored artifact, checked by the
 same policy.)
 
+Since round 14 there is one outcome between a plan and a refusal:
+the text matches a governed shape in more than one way and the
+choice is one the records can offer — a record described by its
+status that matches several records, a credit amount the task
+omits where the records hold a governed candidate set, a status
+word that prefixes two governed values. Derivation then raises
+`PlanAmbiguous` carrying options computed from the records, and
+the service parks the task in AWAITING_CLARIFICATION until an
+operator picks one; derivation re-runs with the choice pinned.
+The classes are defined in code (below, "clarification"), the
+question is composed in code from the options, and a value the
+text states outright is never re-asked. Everything that is not
+one of these classes refuses exactly as it always did.
+
 Every value in the plan comes from the task text or the record;
 every step carries the exact instruction the in-page agent will
 execute, compiled from the same fields the verifier diffs. Step
@@ -35,6 +49,8 @@ from decimal import Decimal, InvalidOperation
 
 from .config import Policy
 from .models import (
+    INVOICE_STATUSES,
+    ORDER_STATUSES,
     AmendChangeIn,
     Plan,
     PlanChange,
@@ -44,7 +60,12 @@ from .models import (
     VerificationReport,
     money,
 )
-from .policy import PlanRefusal, check_credit, check_field_change
+from .policy import (
+    PlanAmbiguous,
+    PlanRefusal,
+    check_credit,
+    check_field_change,
+)
 from .store import Store
 
 FIELD_LABELS = {
@@ -111,6 +132,25 @@ SHIP_DETAIL_RE = re.compile(
     re.I)
 CUSTOMER_UPDATE_RE = re.compile(
     r"update\s+customer\s+(\d+)\s+([a-z ]+?)\s+to\s+(.+)$", re.I | re.S)
+# A record described by a governed status word instead of named
+# by its number (round 14): "raise a credit memo for the open
+# invoice". The descriptor word is drawn from the governed status
+# set itself, so a description can only ever match records by a
+# status they can actually carry.
+CREDIT_DESCRIPTOR_RE = re.compile(
+    r"\bthe\s+(" + "|".join(sorted(INVOICE_STATUSES)) +
+    r")\s+invoice\b", re.I)
+# The same description inside a status clause: "mark the packed
+# order as shipped". Governed for the clause's record only — a
+# descriptor clause stands alone in its task (mixing it with a
+# clause that names a record by number is refused whole).
+DESCRIPTOR_CLAUSE_RE = re.compile(
+    r"(?:mark|set)\s+the\s+([a-z]+)\s+(order|invoice)\s+"
+    r"(?:as|to|status\s+to)\s+([a-z]+)", re.I)
+# The most options one clarification may carry. A choice between
+# more records than this is not a clarification — the task states
+# the record by its number instead.
+MAX_CLARIFICATION_OPTIONS = 4
 
 
 def _set_step(seq: int, kind: str, record_id: str, field: str,
@@ -168,49 +208,246 @@ def _require_record(store: Store, kind: str, record_id: str) -> dict:
     return record
 
 
-def _credit_reason(text: str, amt: re.Match) -> str:
+# ------------------------------------------------- clarification
+#
+# Round 14: the ambiguity classes, defined here and nowhere else.
+# Derivation raises PlanAmbiguous only where the text matches a
+# governed shape in more than one way AND the records offer the
+# choice — the options are computed from the records at the
+# moment of asking, so every value a plan later carries traces
+# to the task text, a named record field, or the recorded
+# answer. Everywhere else, derivation refuses exactly as before:
+# a clarification is never a backdoor around `no_plan_derivable`.
+
+def _fmt_money(value: Decimal) -> str:
+    return f"${value:,.2f}"
+
+
+def _record_label(store: Store, kind: str, record: dict) -> str:
+    """How one record reads as a clarification option: its id,
+    plus the record fields that distinguish it from the other
+    matches — an amount and a date and a customer for an invoice;
+    the goods and the total for an order."""
+    if kind == "invoices":
+        customer = store.get_record(
+            "customers", str(record.get("customer_id", "")))
+        who = (customer.get("name") if customer
+               else record.get("customer_id"))
+        return (f"invoice {record['id']} — "
+                f"{_fmt_money(money(str(record['amount'])))}, due "
+                f"{record.get('due_date', '')}, for {who}")
+    return (f"order {record['id']} — {record.get('items', '')}, "
+            f"{_fmt_money(money(str(record.get('total', '0'))))}")
+
+
+def _resolve_record(store: Store, key: str, kind: str, word: str,
+                    matches: list[dict],
+                    resolutions: dict[str, str]) -> str:
+    """Resolve a record described by a governed status word to
+    one record id — or raise the clarification that asks.
+
+    `matches` are the records of `kind` carrying status `word`,
+    in id order. Zero matches is the ordinary `record_not_found`
+    refusal: the description names nothing that is there. Exactly
+    one match resolves directly — the choice is derivable from
+    the records, so there is nothing to ask. Two to four matches
+    raise PlanAmbiguous with the matches as options. More than
+    that is refused: a choice that wide is stated by number.
+
+    A pinned answer (`resolutions[key]`) is honoured only while
+    it still stands among the fresh matches. A pin the records
+    have moved out from under is asked about again with the
+    fresh options — never honoured stale, and never silently
+    replaced by another record."""
+    if not matches:
+        raise PlanRefusal(
+            "record_not_found",
+            f"refused: no {kind[:-1]} with status '{word}' exists; "
+            f"a plan is only derived from records that are there")
+    ids = [str(m["id"]) for m in matches]
+    pin = resolutions.get(key)
+    if pin is not None and pin in ids:
+        return pin
+    if pin is None and len(matches) == 1:
+        return ids[0]
+    if len(matches) > MAX_CLARIFICATION_OPTIONS:
+        raise PlanRefusal(
+            "no_plan_derivable",
+            f"refused: 'the {word} {kind[:-1]}' matches "
+            f"{len(matches)} {kind} — too many to offer as a "
+            f"clarification; name the {kind[:-1]} by its number")
+    labels = [_record_label(store, kind, m) for m in matches]
+    question = (
+        f"Which {kind[:-1]} did you mean by 'the {word} "
+        f"{kind[:-1]}'? {len(matches)} {kind} currently carry "
+        f"status '{word}': " + "; ".join(labels) + ".")
+    raise PlanAmbiguous(
+        "ambiguous_record", key, question,
+        [{"value": rid, "label": label}
+         for rid, label in zip(ids, labels)])
+
+
+def _resolve_status_value(kind: str, record_id: str, raw: str,
+                          resolutions: dict[str, str]) -> str:
+    """Resolve a status value the task stated. A governed value
+    passes through. A value that is a strict prefix of two or
+    more governed values for the kind ("p" for an order: placed
+    or packed) raises the clarification that asks which one —
+    the choice is between governed values, computed from the
+    governed set. A value matching zero governed values, or
+    prefixing exactly one, is returned as stated and refused by
+    `check_field_change` as `value_not_governed`, exactly as
+    before: a unique prefix is not a choice, and clarification
+    is not a spelling corrector."""
+    governed = ORDER_STATUSES if kind == "orders" else INVOICE_STATUSES
+    if raw in governed:
+        return raw
+    matches = sorted(s for s in governed if s.startswith(raw))
+    if len(matches) >= 2:
+        key = f"status_value:{kind}:{record_id}"
+        pin = resolutions.get(key)
+        if pin in matches:
+            return pin
+        question = (
+            f"'{raw}' could be {' or '.join(matches)} — which "
+            f"status should {kind[:-1]} {record_id} be set to?")
+        raise PlanAmbiguous(
+            "ambiguous_status", key, question,
+            [{"value": m, "label": m} for m in matches])
+    return raw
+
+
+def _amount_candidates(store: Store,
+                       invoice: dict) -> list[tuple[str, str]]:
+    """The governed candidate set for a credit task that states
+    no amount: amounts the records themselves offer for this
+    invoice — the invoice's own amount, and the amount of each
+    credit memo already issued against it — each labelled with
+    where it came from. Distinct values, the invoice's amount
+    first, memos in record order. Nothing here is computed from
+    anything but the records: no instalment schedule exists on
+    these records, so no instalment amounts are offered."""
+    candidates: dict[str, str] = {}
+    full = money(str(invoice["amount"]))
+    candidates[str(full)] = (
+        f"the invoice's full amount, {_fmt_money(full)}")
+    for memo in store.list_records("credit_memos"):
+        if str(memo.get("invoice_id")) != str(invoice["id"]):
+            continue
+        amount = money(str(memo["amount"]))
+        candidates.setdefault(
+            str(amount),
+            f"the amount of credit memo {memo['id']}, "
+            f"{_fmt_money(amount)}")
+    return list(candidates.items())
+
+
+def _credit_reason(text: str, amt: re.Match | None) -> str:
     """The credit memo's reason: the words between "reason" and
     the amount the plan credits. Slicing to that amount — rather
     than stopping at the first $-figure — keeps a figure named
     inside the reason ("refund of $50 overcharge") in the reason,
     where it is data. When the amount precedes the reason in the
-    sentence, the reason runs to the end of the text."""
+    sentence, the reason runs to the end of the text.
+
+    When no figure in the text pins the amount — it came from a
+    clarification answer (round 14) — the reason runs to the
+    first governed tail clause instead, so a tail spoken after
+    the reason ("... and mark invoice 4472 as paid") stays a
+    tail and is never swallowed into the reason's words."""
     start = REASON_START_RE.search(text)
     if start is None:
         return ""
-    if amt.start() >= start.end():
+    if amt is not None and amt.start() >= start.end():
         raw = text[start.end():amt.start()]
     else:
-        raw = text[start.end():]
+        end = len(text)
+        for tail_re in (AND_INVOICE_STATUS_RE,
+                        AND_CUSTOMER_UPDATE_RE,
+                        AND_CUSTOMER_LOOSE_RE):
+            m = tail_re.search(text, start.end())
+            if m:
+                end = min(end, m.start())
+        raw = text[start.end():end]
     return raw.strip().strip(",").strip()
 
 
 def _plan_credit_memo(text: str, store: Store, policy: Policy,
-                      task_id: str) -> Plan:
+                      task_id: str,
+                      resolutions: dict[str, str]) -> Plan:
     inv = INVOICE_RE.search(text)
-    if not inv:
+    desc = CREDIT_DESCRIPTOR_RE.search(text)
+    if inv and (desc is None or inv.start() <= desc.start()):
+        invoice_id = inv.group(1)
+    elif desc:
+        # The invoice may instead be described by a governed
+        # status word — "the open invoice" (round 14). The
+        # description resolves against the records: one match
+        # derives directly, several ask, none refuses. The
+        # credit's own reference is whichever reference the text
+        # states FIRST: a settle tail spoken later in the same
+        # task ("... and mark invoice 4472 as paid") also names
+        # an invoice by number, and that number is the tail's,
+        # never the credit's.
+        word = desc.group(1).lower()
+        matches = sorted(
+            (r for r in store.list_records("invoices")
+             if r.get("status") == word),
+            key=lambda r: str(r["id"]))
+        invoice_id = _resolve_record(
+            store, "credit_invoice", "invoices", word, matches,
+            resolutions)
+    else:
         raise PlanRefusal(
             "no_plan_derivable",
             "refused: a credit memo task must name its invoice "
-            "(e.g. 'invoice 4471')")
-    invoice_id = inv.group(1)
+            "(e.g. 'invoice 4471') or describe it by a governed "
+            "status (e.g. 'the open invoice')")
     invoice = _require_record(store, "invoices", invoice_id)
     amounts = list(AMOUNT_RE.finditer(text))
-    if not amounts:
-        raise PlanRefusal(
-            "no_plan_derivable",
-            "refused: a credit memo task must state its amount "
-            "(e.g. '$120'); the planner never invents an amount")
-    # The amount is the task's LAST figure. Every governed shape
-    # states it after the reason ("reason damaged goods, $120"),
-    # so a figure named inside the reason ("refund of $50
-    # overcharge, $120") is reason text — data about the credit,
-    # never the amount. Reading the first figure instead let the
-    # reason silently redirect the money: the round-10 red team
-    # found that text planning a $50 memo under a stated $120 (and
-    # a stated $900 slipping under the cap behind a $50).
-    amt = amounts[-1]
-    amount = money(amt.group(1).replace(",", ""))
+    amt: re.Match | None = None
+    if amounts:
+        # The amount is the task's LAST figure. Every governed shape
+        # states it after the reason ("reason damaged goods, $120"),
+        # so a figure named inside the reason ("refund of $50
+        # overcharge, $120") is reason text — data about the credit,
+        # never the amount. Reading the first figure instead let the
+        # reason silently redirect the money: the round-10 red team
+        # found that text planning a $50 memo under a stated $120 (and
+        # a stated $900 slipping under the cap behind a $50).
+        amt = amounts[-1]
+        amount = money(amt.group(1).replace(",", ""))
+    else:
+        # No amount stated. The planner still never invents one —
+        # but the records may offer a governed candidate set for
+        # this invoice (its own amount; the amounts of memos
+        # already issued against it), and then the choice is the
+        # operator's to make, asked as a clarification (round 14).
+        # A pinned answer is honoured while it stands among the
+        # fresh candidates. Without an offerable set — a single
+        # candidate, or too many — the refusal stands exactly as
+        # before: clarification is not a backdoor.
+        candidates = _amount_candidates(store, invoice)
+        pin = resolutions.get("credit_amount")
+        if pin is not None and pin in {v for v, _ in candidates}:
+            amount = money(pin)
+        elif 2 <= len(candidates) <= MAX_CLARIFICATION_OPTIONS:
+            question = (
+                f"How much should the credit memo for invoice "
+                f"{invoice_id} be? The task states no amount. The "
+                f"records offer: "
+                + "; ".join(label for _, label in candidates) + ".")
+            raise PlanAmbiguous(
+                "ambiguous_amount", "credit_amount", question,
+                [{"value": v, "label": label}
+                 for v, label in candidates])
+        else:
+            raise PlanRefusal(
+                "no_plan_derivable",
+                "refused: a credit memo task must state its amount "
+                "(e.g. '$120'); the planner never invents an "
+                "amount, and the records offer no set of candidate "
+                "amounts for this invoice to clarify between")
     check_credit(amount, policy)
     reason = _credit_reason(text, amt)
     if not reason:
@@ -237,8 +474,10 @@ def _plan_credit_memo(text: str, store: Store, policy: Policy,
     tails: list[tuple[int, str, PlanStep]] = []
     tail = AND_INVOICE_STATUS_RE.search(text)
     if tail:
-        follow_id, follow_value = tail.group(1), tail.group(2).lower()
+        follow_id = tail.group(1)
         _require_record(store, "invoices", follow_id)
+        follow_value = _resolve_status_value(
+            "invoices", follow_id, tail.group(2).lower(), resolutions)
         check_field_change("invoices", "status", follow_value)
         tails.append((tail.start(), "invoice_status",
                       _set_step(0, "invoices", follow_id, "status",
@@ -300,7 +539,8 @@ def _plan_credit_memo(text: str, store: Store, policy: Policy,
         steps=steps)
 
 
-def _plan_status(text: str, store: Store, task_id: str) -> Plan:
+def _plan_status(text: str, store: Store, task_id: str,
+                 resolutions: dict[str, str]) -> Plan:
     # Shipment with details: three governed steps on the one record,
     # in the order the desk performs them.
     ship = SHIP_DETAIL_RE.search(text)
@@ -316,6 +556,48 @@ def _plan_status(text: str, store: Store, task_id: str) -> Plan:
             steps.append(_set_step(seq, "orders", order_id, field, value))
         return Plan(task_id=task_id, task_type="order_ship_details",
                     summary=_summarize(steps), steps=steps)
+    # A record described by its status instead of named by number:
+    # "mark the packed order as shipped" (round 14). The clause
+    # stands alone in its task — mixing it with a clause that
+    # names a record by number is refused whole, never partially
+    # planned. The descriptor word must be a governed status for
+    # the kind; the record resolves against the records exactly
+    # as the credit descriptor does, and the target value passes
+    # the same prefix rule as any other status clause.
+    desc = DESCRIPTOR_CLAUSE_RE.search(text)
+    if desc:
+        if STATUS_CLAUSE_RE.search(text):
+            raise PlanRefusal(
+                "no_plan_derivable",
+                "refused: this task mixes a record described by "
+                "its status with a record named by its number; "
+                "state them as separate tasks")
+        word = desc.group(1).lower()
+        kind = desc.group(2).lower() + "s"
+        governed = (ORDER_STATUSES if kind == "orders"
+                    else INVOICE_STATUSES)
+        if word not in governed:
+            raise PlanRefusal(
+                "no_plan_derivable",
+                f"refused: '{word}' is not a governed "
+                f"{desc.group(2).lower()} status "
+                f"({', '.join(sorted(governed))}); a record can "
+                f"only be described by a status it can carry")
+        matches = sorted(
+            (r for r in store.list_records(kind)
+             if r.get("status") == word),
+            key=lambda r: str(r["id"]))
+        record_id = _resolve_record(
+            store, f"status_record:{kind}:{word}", kind, word,
+            matches, resolutions)
+        _require_record(store, kind, record_id)
+        value = _resolve_status_value(
+            kind, record_id, desc.group(3).lower(), resolutions)
+        check_field_change(kind, "status", value)
+        step = _set_step(1, kind, record_id, "status", value)
+        return Plan(task_id=task_id,
+                    task_type=f"{kind[:-1]}_status",
+                    summary=_summarize([step]), steps=[step])
     # One status clause is the R1 shape; several compose into one
     # multi-record plan, steps in the order the clauses were spoken.
     clauses = [(m.group(1).lower() + "s", m.group(2),
@@ -338,6 +620,8 @@ def _plan_status(text: str, store: Store, task_id: str) -> Plan:
                 f"split it into two tasks")
         seen.add((kind, record_id))
         _require_record(store, kind, record_id)
+        value = _resolve_status_value(kind, record_id, value,
+                                      resolutions)
         check_field_change(kind, "status", value)
         steps.append(_set_step(seq, kind, record_id, "status", value))
     return Plan(
@@ -373,17 +657,31 @@ def _plan_customer_update(text: str, store: Store, task_id: str) -> Plan:
 
 
 def derive_plan(text: str, store: Store, policy: Policy,
-                task_id: str) -> Plan:
-    """The planner's one entry point. Raises PlanRefusal."""
+                task_id: str,
+                resolutions: dict[str, str] | None = None) -> Plan:
+    """The planner's one entry point. Raises PlanRefusal — or,
+    since round 14, PlanAmbiguous when the text matches a
+    governed shape in more than one way and the records offer
+    the choice (see the clarification section above).
+
+    `resolutions` carries the operator's recorded clarification
+    answers, {ambiguity key: chosen value}; derivation consults
+    a pin only at its own ambiguity point, and re-validates it
+    against the records as they stand now. Text the task states
+    outright always wins over a pin — a pin is only ever asked
+    about where the text itself is silent or matches twice."""
+    resolutions = resolutions or {}
     if DELETE_RE.search(text):
         raise PlanRefusal(
             "delete_refused",
             "refused: the copilot does not delete records; deletes are "
             "refused at plan time, not gated")
     if CREDIT_RE.search(text):
-        plan = _plan_credit_memo(text, store, policy, task_id)
-    elif SHIP_DETAIL_RE.search(text) or STATUS_CLAUSE_RE.search(text):
-        plan = _plan_status(text, store, task_id)
+        plan = _plan_credit_memo(text, store, policy, task_id,
+                                 resolutions)
+    elif (SHIP_DETAIL_RE.search(text) or STATUS_CLAUSE_RE.search(text)
+            or DESCRIPTOR_CLAUSE_RE.search(text)):
+        plan = _plan_status(text, store, task_id, resolutions)
     elif CUSTOMER_UPDATE_RE.search(text):
         plan = _plan_customer_update(text, store, task_id)
     else:

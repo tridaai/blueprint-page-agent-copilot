@@ -154,6 +154,16 @@ class PlanDiff(BaseModel):
 
 class TaskStatus(str, Enum):
     DRAFT = "DRAFT"                # intake received, no plan yet
+    AWAITING_CLARIFICATION = "AWAITING_CLARIFICATION"
+                                   # derivation matched a governed
+                                   # shape in more than one way and
+                                   # the choice is one the records
+                                   # can offer: the task parks with
+                                   # 2-4 concrete options computed
+                                   # from the records until an
+                                   # operator picks one (round 14).
+                                   # Nothing is invented meanwhile,
+                                   # and no plan exists yet.
     PLANNED = "PLANNED"            # a plan is stored, awaiting a human
     CONFIRMED = "CONFIRMED"        # a named operator approved the plan
     VERIFIED = "VERIFIED"          # executed; post-state == plan, exactly
@@ -177,6 +187,36 @@ class TaskStatus(str, Enum):
     ABANDONED = "ABANDONED"        # a failed execution an operator
                                    # closed, with a reason; the partial
                                    # state stays on the records, named
+
+
+class ClarificationOption(BaseModel):
+    """One concrete choice a clarification offers: `value` is the
+    token the answering operator picks (a record id, an amount, a
+    governed status — always a value that came out of the records
+    or the governed sets), and `label` is how the choice reads to
+    a person, naming the record fields that distinguish it."""
+    value: str
+    label: str
+
+
+class Clarification(BaseModel):
+    """One question derivation asked this task, and its answer.
+
+    `key` names the ambiguity point in the grammar (e.g.
+    `credit_invoice`); re-derivation pins the answer under that
+    key. `code` is the ambiguity class. The question and options
+    are composed in code from the records at the moment of
+    asking. `answer`/`answerer` stay None while the question is
+    the pending one; an answered entry is never rewritten — if
+    the records move under a pinned answer and the choice must
+    be re-made, a fresh entry for the same key is appended, so
+    the task carries its whole clarification history."""
+    key: str
+    code: str
+    question: str
+    options: list[ClarificationOption] = Field(default_factory=list)
+    answer: Optional[str] = None
+    answerer: Optional[str] = None
 
 
 class Task(BaseModel):
@@ -243,6 +283,14 @@ class Task(BaseModel):
     # audit entry — it is never cleaned up quietly.
     abandoned_by: Optional[str] = None
     abandon_reason: Optional[str] = None
+    # The clarification history (round 14): every question
+    # derivation asked this task, in the order asked, each with
+    # its options and — once answered — the answer and who gave
+    # it. While the task is AWAITING_CLARIFICATION exactly one
+    # entry is unanswered: the pending question. The resolutions
+    # derivation re-runs with are derived from these entries
+    # (later entry wins per key), never stored twice.
+    clarifications: list[Clarification] = Field(default_factory=list)
     # The store-wide creation sequence, assigned by the service
     # when the task is first stored and never edited afterwards:
     # the order task lists read in. Neither the id (random hex)
@@ -254,6 +302,27 @@ class Task(BaseModel):
     seq: int = 0
     created_at: str = ""
     updated_at: str = ""
+
+    @property
+    def pending_clarification(self) -> Optional[Clarification]:
+        """The question this task is waiting on, if any: the one
+        unanswered entry. By construction there is at most one —
+        derivation stops at the first ambiguity it meets."""
+        for entry in reversed(self.clarifications):
+            if entry.answer is None:
+                return entry
+        return None
+
+    def clarification_resolutions(self) -> dict[str, str]:
+        """The pinned choices derivation re-runs with, derived
+        from the answered entries: {ambiguity key: answer}. A
+        later entry for the same key (a re-asked question) wins
+        over the earlier one."""
+        resolutions: dict[str, str] = {}
+        for entry in self.clarifications:
+            if entry.answer is not None:
+                resolutions[entry.key] = entry.answer
+        return resolutions
 
 
 class StepOutcome(BaseModel):
@@ -463,6 +532,15 @@ class TaskIntake(BaseModel):
 
 class ConfirmIn(BaseModel):
     operator: str
+
+
+class ClarifyIn(BaseModel):
+    """Answer a task's pending clarification: the operator picks
+    one of the offered options by its `value`. Free text that is
+    not an option's value is refused with the options restated —
+    the shell never interprets a reply into a value."""
+    operator: str
+    choice: str
 
 
 class TranscriptIntakeIn(BaseModel):
