@@ -104,7 +104,14 @@ pins examples — slot values plus the exact plan shape they must
 derive — and a version's health is computed from them on read,
 against the seeded records: a planner or policy change that
 breaks a template's examples marks that version broken in the
-library, by name and version.
+library, by name and version. Since round 19, a name-only
+instantiation resolves to the name's promoted default, never
+to whatever was published last: promotion is a separate
+recorded act, gated on a passing evaluation of the candidate's
+exact content hash by hands other than the publisher's, and on
+no regression against the standing default's examples; the
+seeded versions are grandfathered as defaults, their standing
+the health itself, marked `seeded`.
 
 Batches (batches.py, round 8) group tasks that were submitted
 together — the morning list, stated as one submission of task
@@ -152,6 +159,8 @@ no allowlist, and skips no check.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import uuid
 from collections import Counter
@@ -231,7 +240,9 @@ from .templates import (
     TEMPLATE_AUDIT_SCOPE,
     TaskTemplate,
     TemplateError,
+    expected_shape,
     load_template,
+    plan_shape,
     render_pattern,
     shape_detail,
 )
@@ -258,6 +269,18 @@ def _template_content(template: TaskTemplate) -> dict:
         "examples": [e.model_dump(mode="json")
                      for e in template.examples],
     }
+
+
+def _template_hash(template: TaskTemplate) -> str:
+    """The content hash of a template version: SHA-256 over the
+    canonical JSON of its content, the `record_hash` discipline.
+    Round 19's evaluations record the hash they graded, so the
+    verdict belongs to exact bytes — a version whose stored
+    content no longer hashes to its evaluation's hash has no
+    standing evaluation, whatever the record claims."""
+    blob = json.dumps(_template_content(template), sort_keys=True,
+                      separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 # The states in which a task still owes its operator an act —
@@ -644,6 +667,9 @@ class CopilotService:
     # is never edited and never deleted: a publish supersedes the
     # previous version, which stays readable and instantiable by
     # name and version, the way superseded plan versions do.
+    # Round 19 adds the regression gate below the publish act:
+    # publishing never moves the default — promotion does, and
+    # promotion is earned through a recorded evaluation.
 
     def _ensure_templates(self) -> None:
         """Seed the library from the governed defaults when the
@@ -669,8 +695,13 @@ class CopilotService:
                      ) -> Optional[TaskTemplate]:
         """One template version: the exact version asked for, or
         — version None — the current (highest) version of the
-        name. Callers that act on the result name the resolved
-        version in what they record; nothing here is silent."""
+        name. This is the PUBLISHING view of the library (the
+        next version number, the no-change comparison); what a
+        name-only instantiation uses is `default_template`, the
+        promoted default — the two are deliberately different
+        questions since round 19. Callers that act on the result
+        name the resolved version in what they record; nothing
+        here is silent."""
         versions = [t for t in self.list_templates()
                     if t.name == name]
         if not versions:
@@ -725,7 +756,10 @@ class CopilotService:
         pass the strict loader whole. Publishing content identical
         to the current version changes nothing and is refused;
         the version it supersedes is kept, marked superseded,
-        and stays instantiable by name and version."""
+        and stays instantiable by name and version. Publishing
+        does NOT make the new version the default (round 19):
+        that takes an evaluation and a promotion — see
+        `promote_template`."""
         name = raw.get("name", "")
         self._template_actor(actor, "template publish", name)
         current = self.get_template(name)
@@ -839,18 +873,44 @@ class CopilotService:
         it: instantiation adds no bypass and no second refusal
         language. The task records the template's name and the
         exact version used — the resolved version, named even
-        when the caller asked for the current one — and the act
+        when the caller asked for the default — and the act
         is written to the task's audit trail."""
-        template = self.get_template(name, version)
-        if template is None:
-            which = (f"'{name}' v{version}" if version is not None
-                     else f"'{name}'")
-            reason = (f"there is no template {which} in the "
-                      f"library")
-            self._instantiation_refused(operator, name, version,
-                                        "template_not_found", reason)
-            raise TemplateError("template_not_found",
-                                f"refused: {reason}")
+        if version is None:
+            # Round 19: a name-only instantiation resolves to the
+            # PROMOTED default — the seeded version grandfathered,
+            # or the version a promotion record names — never
+            # merely to the newest published. A name with versions
+            # but no default refuses, naming the state.
+            template = self.default_template(name)
+            if template is None:
+                if self.get_template(name) is None:
+                    reason = (f"there is no template '{name}' in "
+                              f"the library")
+                    self._instantiation_refused(
+                        operator, name, version,
+                        "template_not_found", reason)
+                    raise TemplateError("template_not_found",
+                                        f"refused: {reason}")
+                reason = (f"template '{name}' has no promoted "
+                          f"default; name a version explicitly, "
+                          f"or promote one first — the newest "
+                          f"published version is not the default "
+                          f"until it earns it")
+                self._instantiation_refused(
+                    operator, name, version,
+                    "no_promoted_default", reason)
+                raise TemplateError("no_promoted_default",
+                                    f"refused: {reason}")
+        else:
+            template = self.get_template(name, version)
+            if template is None:
+                reason = (f"there is no template '{name}' "
+                          f"v{version} in the library")
+                self._instantiation_refused(operator, name, version,
+                                            "template_not_found",
+                                            reason)
+                raise TemplateError("template_not_found",
+                                    f"refused: {reason}")
         try:
             values = self._validate_slots(template, slots)
         except TemplateError as err:
@@ -902,13 +962,372 @@ class CopilotService:
         return {"ok": all(e["ok"] for e in examples),
                 "examples": examples}
 
+    # -- the template regression gate (round 19) --------------------
+    # Publishing made a version; it never made it the version the
+    # desk uses. A version becomes the DEFAULT — what a name-only
+    # instantiation resolves to — only by promotion, a recorded
+    # supervisor act the gate guards: a passing evaluation of the
+    # version's exact content hash, run by someone other than the
+    # version's publisher; a promoter who is not the publisher;
+    # and no regression against the current default's standing.
+    # Evaluations and promotions are append-only records (kinds
+    # below); the audit scope carries the acts. The seeded
+    # versions were published by nobody: they are grandfathered
+    # as their names' defaults, their standing the health computed
+    # on read — `seeded`, never a fabricated evaluation record.
+
+    def template_evaluations(self, name: str,
+                             version: Optional[int] = None
+                             ) -> list[dict]:
+        """The evaluation records for a template, oldest first —
+        append-only, so the list is the history."""
+        rows = [r for r in self.store.list_records(
+            "template_evaluations") if r["template"] == name
+            and (version is None or r["version"] == version)]
+        return sorted(rows, key=lambda r: r["seq"])
+
+    def template_promotions(self, name: str) -> list[dict]:
+        """The promotion records for a template, oldest first."""
+        rows = [r for r in self.store.list_records(
+            "template_promotions") if r["template"] == name]
+        return sorted(rows, key=lambda r: r["seq"])
+
+    def _gate_seq(self, kind: str) -> int:
+        """The next sequence within one gate record kind: one
+        more than the highest the kind already carries, assigned
+        under the service lock, so records of a kind order by
+        their seq on every store."""
+        rows = self.store.list_records(kind)
+        return max([int(r.get("seq") or 0) for r in rows],
+                   default=0) + 1
+
+    def default_template(self, name: str) -> Optional[TaskTemplate]:
+        """The version a name-only instantiation resolves to:
+        the version the latest promotion names, or — no promotion
+        on record — the seeded version, grandfathered. Never
+        merely the newest published. None when the name is
+        unknown, and None when the name has only published
+        versions and no promotion: a brand-new template has no
+        default until one is earned."""
+        versions = [t for t in self.list_templates()
+                    if t.name == name]
+        if not versions:
+            return None
+        promotions = self.template_promotions(name)
+        if promotions:
+            wanted = promotions[-1]["version"]
+            return next((t for t in versions
+                         if t.version == wanted), None)
+        return next((t for t in versions
+                     if not t.published_by), None)
+
+    def evaluate_template(self, actor: str, name: str,
+                          version: int) -> dict:
+        """Evaluate one version: run its pinned examples (the
+        health machinery) and record the verdict against the
+        version's content hash. A recorded act behind the
+        identity gate — the evaluator must be enrolled and
+        active; any role may run it, because an evaluation
+        changes nothing: it reads, grades, and writes its own
+        record. The record is append-only and is never edited;
+        re-evaluating writes a new one. Evaluating your own
+        publish is allowed and recorded — the promotion gate,
+        not this act, is what refuses to count it."""
+        act = "template evaluation"
+        entry = self.directory_entry(actor)
+        if entry is None:
+            self._template_refused(
+                actor, act, name, "unknown_operator",
+                f"'{actor}' holds no role in the operator "
+                f"directory; an evaluation is recorded under a "
+                f"known name")
+        if not self.entry_active(entry):
+            self._template_refused(
+                actor, act, name, "operator_inactive",
+                f"'{actor}' is deactivated (operator_inactive) — "
+                f"a deactivated operator performs no acts")
+        template = self.get_template(name, version)
+        if template is None:
+            self._template_refused(
+                actor, act, name, "template_not_found",
+                f"there is no template '{name}' v{version} in "
+                f"the library to evaluate")
+        health = self.template_health(template)
+        with self._lock:
+            seq = self._gate_seq("template_evaluations")
+            record = {
+                "id": f"{name}:v{version}:e{seq}",
+                "seq": seq, "template": name, "version": version,
+                "evaluated_by": entry["id"],
+                "evaluated_at": _now(),
+                "content_hash": _template_hash(template),
+                "ok": health["ok"], "examples": health["examples"]}
+            self.store.upsert_record("template_evaluations", record)
+        self._audit(TEMPLATE_AUDIT_SCOPE, actor,
+                    "template_evaluated", {
+                        "template": name, "version": version,
+                        "ok": health["ok"],
+                        "content_hash": record["content_hash"]})
+        return record
+
+    def _standing_evaluation(self, template: TaskTemplate
+                             ) -> Optional[dict]:
+        """A version's standing evaluation: the latest evaluation
+        record written against the version's content AS IT NOW
+        HASHES — a record for other bytes is no standing at all —
+        or, for a seeded version with none, its health computed
+        now, marked `seeded`. None when neither exists: a
+        published version nobody has evaluated."""
+        digest = _template_hash(template)
+        for record in reversed(self.template_evaluations(
+                template.name, template.version)):
+            if record["content_hash"] == digest:
+                return {"ok": record["ok"],
+                        "examples": record["examples"],
+                        "content_hash": digest,
+                        "evaluated_by": record["evaluated_by"],
+                        "source": "evaluation"}
+        if not template.published_by:
+            health = self.template_health(template)
+            return {"ok": health["ok"],
+                    "examples": health["examples"],
+                    "content_hash": digest, "evaluated_by": None,
+                    "source": "seeded"}
+        return None
+
+    @staticmethod
+    def _example_label(example: dict) -> str:
+        slots = ", ".join(f"{k}={v}" for k, v in sorted(
+            (example.get("slots") or {}).items()))
+        return f"the example ({slots})"
+
+    def _regression_breaks(self, candidate: TaskTemplate,
+                           incumbent: TaskTemplate,
+                           incumbent_standing: dict) -> list[dict]:
+        """The incumbent examples the candidate breaks, judged on
+        the incumbent's ruler: every example the incumbent's
+        standing passes is rendered through the CANDIDATE and
+        must still derive to the shape the INCUMBENT pins. An
+        example the candidate's slots no longer fill, or whose
+        rendered text the planner refuses or answers with a
+        different shape, is broken — a promotion may change a
+        template, but it may not silently change what a standing
+        scenario derives."""
+        from .dataset import seed_records
+
+        scratch = InMemoryStore()
+        scratch.seed_if_empty(seed_records())
+        candidate_slots = {s.name for s in candidate.slots}
+        breaks = []
+        for example, verdict in zip(incumbent.examples,
+                                    incumbent_standing["examples"]):
+            if not verdict["ok"]:
+                continue
+            label = self._example_label(example.model_dump(
+                mode="json"))
+            if set(example.slots) != candidate_slots:
+                breaks.append({
+                    "slots": dict(example.slots),
+                    "detail": f"{label} is no longer fillable: "
+                              f"the candidate's slots are "
+                              f"{sorted(candidate_slots)}"})
+                continue
+            try:
+                plan = derive_plan(
+                    render_pattern(candidate.pattern, example.slots),
+                    scratch, self.settings.policy, "TASK-GATE")
+                detail = None
+                if plan_shape(plan) != expected_shape(example):
+                    detail = (f"{label} derives through the "
+                              f"candidate as "
+                              f"{plan_shape(plan)}, not the "
+                              f"shape the incumbent pins, "
+                              f"{expected_shape(example)}")
+            except PlanAmbiguous as amb:
+                detail = (f"{label} asks a clarification through "
+                          f"the candidate ({amb.code})")
+            except PlanRefusal as refusal:
+                detail = (f"{label} is refused through the "
+                          f"candidate: {refusal.code}: "
+                          f"{refusal.message}")
+            if detail is not None:
+                breaks.append({"slots": dict(example.slots),
+                               "detail": detail})
+        return breaks
+
+    def promote_template(self, actor: str, name: str,
+                         version: int) -> dict:
+        """Promote one version to the name's default: a recorded
+        supervisor act, and the gate itself. The refusals, in the
+        order they are checked: the version must exist; it must
+        not already be the default (`already_default`); the
+        promoter must not be its publisher
+        (`promoter_was_publisher` — the publisher's work is
+        vouched for and promoted by other hands); a standing
+        evaluation must exist (`no_evaluation` — or
+        `hash_mismatch` when evaluations are on record but grade
+        other bytes than the version's content now hashes to)
+        and must pass (`evaluation_failed`, the failing examples
+        named); the
+        standing evaluation must not be the publisher's own
+        (`evaluator_was_publisher`); and the candidate must not
+        regress against the current default's standing
+        (`regression`, the broken examples and the candidate's
+        gains both named). Rollback is this same act aimed at a
+        previous version: its standing must still be on record
+        for its hash, exactly as for any candidate."""
+        self._template_actor(actor, "template promotion", name)
+        template = self.get_template(name, version)
+        if template is None:
+            self._template_refused(
+                actor, "template promotion", name,
+                "template_not_found",
+                f"there is no template '{name}' v{version} in "
+                f"the library to promote")
+        current_default = self.default_template(name)
+        if current_default is not None and \
+                current_default.version == version:
+            self._template_refused(
+                actor, "template promotion", name,
+                "already_default",
+                f"'{name}' v{version} is already the default; "
+                f"promoting it again changes nothing")
+        if template.published_by and operator_named(
+                template.published_by) == operator_named(actor):
+            self._template_refused(
+                actor, "template promotion", name,
+                "promoter_was_publisher",
+                f"'{actor}' published '{name}' v{version}; its "
+                f"promotion is another supervisor's act, not "
+                f"the publisher's")
+        standing = self._standing_evaluation(template)
+        if standing is None:
+            recorded = self.template_evaluations(name, version)
+            if recorded:
+                # Evaluations exist, but none grades the content
+                # as it now hashes: the bytes moved after they
+                # were recorded (a store-level edit — versions are
+                # never edited through the service), and a verdict
+                # for other bytes is no standing.
+                self._template_refused(
+                    actor, "template promotion", name,
+                    "hash_mismatch",
+                    f"'{name}' v{version} now hashes to "
+                    f"{_template_hash(template)[:12]}…, but its "
+                    f"recorded evaluation graded "
+                    f"{recorded[-1]['content_hash'][:12]}…; the "
+                    f"content changed after evaluation — "
+                    f"evaluate the version as it stands")
+            self._template_refused(
+                actor, "template promotion", name,
+                "no_evaluation",
+                f"'{name}' v{version} has no evaluation on "
+                f"record for its content; evaluate it first — a "
+                f"promotion is earned by a recorded pass, not "
+                f"by the publishing act")
+        if not standing["ok"]:
+            failing = [self._example_label(e) for e in
+                       standing["examples"] if not e["ok"]]
+            self._template_refused(
+                actor, "template promotion", name,
+                "evaluation_failed",
+                f"the standing evaluation of '{name}' "
+                f"v{version} fails: " + "; ".join(failing))
+        if standing["source"] == "evaluation" and \
+                operator_named(standing["evaluated_by"] or "") == \
+                operator_named(template.published_by):
+            self._template_refused(
+                actor, "template promotion", name,
+                "evaluator_was_publisher",
+                f"the standing evaluation of '{name}' v{version} "
+                f"was run by its publisher, "
+                f"'{template.published_by}'; a promotion needs a "
+                f"pass recorded by another hand")
+        if current_default is not None:
+            incumbent_standing = self._standing_evaluation(
+                current_default)
+            if incumbent_standing is not None:
+                breaks = self._regression_breaks(
+                    template, current_default, incumbent_standing)
+                if breaks:
+                    incumbent_keys = {
+                        json.dumps(e["slots"], sort_keys=True)
+                        for e in incumbent_standing["examples"]}
+                    gains = [e["slots"] for e in
+                             standing["examples"] if e["ok"] and
+                             json.dumps(e["slots"], sort_keys=True)
+                             not in incumbent_keys]
+                    named = "; ".join(b["detail"] for b in breaks)
+                    raise_detail = {
+                        "act": "template promotion", "target": name,
+                        "code": "regression",
+                        "reason": (f"promoting '{name}' v{version} "
+                                   f"would regress the default "
+                                   f"v{current_default.version}: "
+                                   + named),
+                        "broken": breaks, "gains": gains}
+                    self._audit(TEMPLATE_AUDIT_SCOPE, actor,
+                                "template_refused", raise_detail)
+                    raise GateError(
+                        f"template promotion refused: "
+                        f"{raise_detail['reason']}")
+        with self._lock:
+            seq = self._gate_seq("template_promotions")
+            record = {
+                "id": f"{name}:p{seq}", "seq": seq,
+                "template": name, "version": version,
+                "promoted_by": operator_named(actor),
+                "promoted_at": _now(),
+                "content_hash": standing["content_hash"],
+                "previous_default": (current_default.version
+                                     if current_default else None),
+                "evaluation_source": standing["source"],
+                "evaluated_by": standing["evaluated_by"]}
+            self.store.upsert_record("template_promotions", record)
+        self._audit(TEMPLATE_AUDIT_SCOPE, actor,
+                    "template_promoted", {
+                        "template": name, "version": version,
+                        "previous_default": record[
+                            "previous_default"],
+                        "content_hash": record["content_hash"],
+                        "evaluation_source": standing["source"]})
+        return record
+
     def template_view(self, template: TaskTemplate) -> dict:
         """One version as the library serves it: the record, with
-        its health folded in and `current` naming whether it is
-        the version a name-only instantiation would use."""
+        its health folded in, `current` naming the newest
+        published version, and the round-19 gate facts — `default`
+        (a name-only instantiation resolves here), `promoted`
+        (the default by a promotion record, not grandfathering),
+        `standing` (`seeded`, `promoted`, or `published`), the
+        content hash, and the latest evaluation on record, with
+        whether it graded the content as it now stands."""
         view = template.model_dump(mode="json")
         view["current"] = not template.superseded
         view["health"] = self.template_health(template)
+        digest = _template_hash(template)
+        view["content_hash"] = digest
+        promotions = self.template_promotions(template.name)
+        promoted_version = (promotions[-1]["version"]
+                            if promotions else None)
+        default = self.default_template(template.name)
+        view["default"] = (default is not None
+                           and default.version == template.version)
+        view["promoted"] = promoted_version == template.version
+        view["standing"] = (
+            "promoted" if view["promoted"]
+            else "seeded" if not template.published_by
+            else "published")
+        evaluations = self.template_evaluations(
+            template.name, template.version)
+        latest = evaluations[-1] if evaluations else None
+        view["evaluation"] = None if latest is None else {
+            "ok": latest["ok"],
+            "evaluated_by": latest["evaluated_by"],
+            "evaluated_at": latest["evaluated_at"],
+            "content_hash": latest["content_hash"],
+            "hash_short": latest["content_hash"][:12],
+            "hash_matches": latest["content_hash"] == digest}
         return view
 
     def list_template_views(self) -> list[dict]:

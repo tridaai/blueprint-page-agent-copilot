@@ -60,7 +60,9 @@ from .service import CopilotService, GateError
 from .store import Store, build_store
 from .templates import (
     TemplateError,
+    TemplateEvaluateIn,
     TemplateInstantiateIn,
+    TemplatePromoteIn,
     TemplatePublishIn,
 )
 
@@ -701,11 +703,13 @@ def create_app(settings: Optional[Settings] = None,
     # Templates are governed records: listed and read here with
     # their health folded in (computed on read from the pinned
     # examples), published in new versions only as recorded
-    # supervisor acts, and instantiated by name and version.
-    # Instantiation renders the pattern's text and states it as a
-    # task through the ordinary intake — the plan the response
-    # carries is the planner's derivation from that text, never
-    # the template's own word.
+    # supervisor acts, and instantiated by name and version — or
+    # by name alone, which resolves to the promoted default
+    # (round 19's regression gate, below). Instantiation renders
+    # the pattern's text and states it as a task through the
+    # ordinary intake — the plan the response carries is the
+    # planner's derivation from that text, never the template's
+    # own word.
     @app.get("/api/templates")
     def templates():
         return service.list_template_views()
@@ -739,6 +743,23 @@ def create_app(settings: Optional[Settings] = None,
         plan = service.get_plan(task.task_id)
         return {"task": task.model_dump(mode="json"),
                 "plan": _plan_json(plan, settings.policy)}
+
+    # Round 19: the regression gate's two acts. Evaluating a
+    # version records its examples' verdict against its content
+    # hash; promoting a version makes it the name's default, and
+    # only through the gate (a passing evaluation by hands other
+    # than the publisher's, no regression against the standing
+    # default). A name-only instantiation resolves to the
+    # promoted default — never to the newest published.
+    @app.post("/api/templates/{name}/evaluate", status_code=201)
+    def evaluate_template(name: str, body: TemplateEvaluateIn):
+        return service.evaluate_template(
+            body.operator, name, body.version)
+
+    @app.post("/api/templates/{name}/promote", status_code=201)
+    def promote_template(name: str, body: TemplatePromoteIn):
+        return service.promote_template(
+            body.operator, name, body.version)
 
     @app.get("/api/templates-audit")
     def templates_audit():

@@ -178,7 +178,9 @@ TOOLS = [
                 "version": {"type": ["integer", "null"],
                             "description": "the template version "
                                            "to use; omit for the "
-                                           "current one"},
+                                           "promoted default — a "
+                                           "name with none refuses, "
+                                           "naming the state"},
             },
             "required": ["name", "operator", "slots"],
         },

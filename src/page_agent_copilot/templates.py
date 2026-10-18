@@ -33,6 +33,26 @@ moment of asking. A version whose examples no longer derive to
 their pinned shape is marked broken in the library, by name and
 version: a planner or policy change that breaks a template says
 so where the desk can see it, instead of at the next real task.
+
+Round 19 adds the gate health feeds. Publishing a version never
+made it the version the desk uses — but until this round,
+version-less instantiation quietly followed whatever was
+published last, broken or not. Now a version becomes the
+**default** — the version a name-only instantiation resolves to
+— only by **promotion**, a recorded supervisor act with its own
+discipline (the service holds the machinery): a passing
+**evaluation** of the version's exact content hash must be on
+record, run by someone other than the version's publisher; the
+promoter must not be the publisher either; and the candidate
+must not regress against the current default's standing — every
+example the incumbent passes, rendered through the candidate,
+must still derive to the incumbent's pinned shape. Evaluations
+are append-only records (kind `template_evaluations`) carrying
+the content hash they graded, so bytes changed after evaluation
+can never be promoted on a stale verdict. The seeded versions
+were never published by anyone: they are grandfathered as their
+names' defaults, their standing the health computed on read —
+marked `seeded`, never dressed up as an evaluation record.
 """
 
 from __future__ import annotations
@@ -517,10 +537,30 @@ class TemplatePublishIn(BaseModel):
 
 class TemplateInstantiateIn(BaseModel):
     """Instantiate a template: fill its slots and state the task.
-    `version` may be omitted, in which case the current version
-    is used — and the exact version used is named on the task and
-    in the audit either way, never silently."""
+    `version` may be omitted, in which case the promoted default
+    is used (round 19 — never merely the newest published) — and
+    the exact version used is named on the task and in the audit
+    either way, never silently."""
 
     operator: str
     version: Optional[int] = None
     slots: dict[str, str] = Field(default_factory=dict)
+
+
+class TemplateEvaluateIn(BaseModel):
+    """Evaluate one version of a template: run its pinned
+    examples and record the verdict against the version's
+    content hash. The version is named explicitly — an
+    evaluation is of exact bytes, never of "the latest"."""
+
+    operator: str
+    version: int
+
+
+class TemplatePromoteIn(BaseModel):
+    """Promote one version of a template to the name's default:
+    the recorded act the regression gate guards. The version is
+    named explicitly, for the same reason evaluation names it."""
+
+    operator: str
+    version: int
