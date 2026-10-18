@@ -27,12 +27,19 @@ def apply_field_change(store: Store, kind: str, record_id: str,
 def create_credit_memo(store: Store, fields: dict[str, str],
                        task_id: str | None = None) -> dict:
     """Create a credit memo record from a governed field set. The id
-    is minted here, in code — never by the agent."""
+    is minted here, in code — never by the agent. The memo names
+    its customer as well as its invoice: the customer is read from
+    the invoice it is issued against, here at creation, so the
+    linkage is a fact on the record that verification can check —
+    a memo issued against the wrong invoice names the wrong
+    customer, and the check catches it by name."""
     existing = store.list_records("credit_memos")
     seq = 5001 + len(existing)
+    invoice = store.get_record("invoices", fields["invoice_id"])
     record = {
         "id": f"CM-{seq}",
         "invoice_id": fields["invoice_id"],
+        "customer_id": invoice["customer_id"] if invoice else "",
         "amount": fields["amount"],
         "reason": fields["reason"],
         "status": fields.get("status", "issued"),

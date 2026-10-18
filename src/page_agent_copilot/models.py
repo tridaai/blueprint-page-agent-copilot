@@ -194,6 +194,85 @@ class VerificationResult(BaseModel):
     checked: int = 0
 
 
+# ------------------------------------------------------- verification
+
+class FieldCheck(BaseModel):
+    """One planned field, checked: what the plan said, what the
+    re-read through the console read surface found, and the
+    verdict. Every planned field gets a row — a report that only
+    listed failures could not show what was actually checked."""
+
+    seq: int
+    record_kind: str
+    record_id: str
+    field: str
+    expected: Optional[str] = None
+    actual: Optional[str] = None
+    verdict: str  # "match" | "mismatch"
+
+
+class LinkageCheck(BaseModel):
+    """One linkage assertion about a step's records: not a planned
+    field's value, but whether the records hang together the way
+    the console's own rules say they should — a created memo names
+    its invoice, its customer, and the task that created it; the
+    invoice lists the memo back; a touched record still names a
+    customer that exists; and the execution record in the audit
+    trail (who ran the step, when) agrees with the state the
+    re-read found. A failed linkage check is a discrepancy with a
+    named field, exactly like a value mismatch: it lands in the
+    report's `diffs` under `field`."""
+
+    seq: int
+    record_kind: str
+    record_id: str
+    check: str  # created_for_task | memo_customer | invoice_customer
+                # | invoice_reflects_memo | customer_link
+                # | execution_record
+    field: str  # the field a failure is named under in the diffs
+    expected: Optional[str] = None
+    actual: Optional[str] = None
+    verdict: str  # "match" | "mismatch"
+    detail: str = ""
+
+
+class CorrectionEntry(BaseModel):
+    """One corrective task in a discrepancy's correction chain, as
+    the parent task's verification report shows it. Composed at
+    read time from the task records — the stored report itself is
+    never rewritten after verification."""
+
+    task_id: str
+    status: str
+    plan_version: Optional[int] = None
+    verification_ok: Optional[bool] = None
+
+
+class VerificationReport(BaseModel):
+    """The stored record of one verification act: the plan version
+    verified, the driver that ran it, the read path the verdict
+    came from (`console_read_surface` — see reads.py), every field
+    check and linkage check with its verdict, and the diffs (the
+    failing checks, field and linkage alike). Written once, when
+    execution completes; re-verification is refused, because the
+    report is the evidence, not a recomputation."""
+
+    task_id: str
+    plan_version: int
+    driver: str
+    read_path: str
+    verified_at: str
+    ok: bool
+    checked: int = 0  # field checks performed (the audit's count)
+    field_checks: list[FieldCheck] = Field(default_factory=list)
+    linkage_checks: list[LinkageCheck] = Field(default_factory=list)
+    diffs: list[FieldDiff] = Field(default_factory=list)
+    # Read-time composition (service.get_verification): the
+    # corrective tasks this task's discrepancy spawned, with their
+    # outcomes. Always empty in the stored record.
+    corrections: list[CorrectionEntry] = Field(default_factory=list)
+
+
 class AuditEntry(BaseModel):
     task_id: str
     ts: str = ""
@@ -263,6 +342,14 @@ class RoleUpdateIn(BaseModel):
     can_amend: bool = False
     can_execute: bool = False
     can_administer: bool = False
+
+
+class VerifyIn(BaseModel):
+    """A request to verify a task (again). Verification ran at the
+    end of execution and its report is recorded; the service
+    refuses the repeat — the operator rides along so the refusal
+    is attributed in the audit trail."""
+    operator: str = "operator"
 
 
 class StepReportIn(BaseModel):

@@ -31,6 +31,7 @@ from .models import (
     RoleUpdateIn,
     StepReportIn,
     TaskIntake,
+    VerifyIn,
 )
 from .policy import PlanRefusal
 from .reads import ConsoleReads
@@ -216,10 +217,31 @@ def create_app(settings: Optional[Settings] = None,
         if task is None:
             raise KeyError(f"task {task_id} does not exist")
         plan = service.get_plan(task_id)
+        report = service.get_verification(task_id)
         return {"task": task.model_dump(mode="json"),
                 "plan": plan.model_dump(mode="json") if plan else None,
                 "plan_versions": [p.version
-                                  for p in service.list_plans(task_id)]}
+                                  for p in service.list_plans(task_id)],
+                "verification": (report.model_dump(mode="json")
+                                 if report else None)}
+
+    @app.get("/api/tasks/{task_id}/verification")
+    def verification(task_id: str):
+        if service.get_task(task_id) is None:
+            raise KeyError(f"task {task_id} does not exist")
+        report = service.get_verification(task_id)
+        if report is None:
+            raise KeyError(
+                f"task {task_id} has no verification report")
+        return report.model_dump(mode="json")
+
+    @app.post("/api/tasks/{task_id}/verify")
+    def verify(task_id: str, body: VerifyIn):
+        # Verification is an act with a record, not a
+        # recomputation: it already ran at the end of execution,
+        # so this is refused (409) and the refusal is recorded.
+        report = service.verify_task(task_id, body.operator)
+        return report.model_dump(mode="json")
 
     @app.get("/api/tasks/{task_id}/plans")
     def plans(task_id: str):

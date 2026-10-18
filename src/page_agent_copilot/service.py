@@ -47,6 +47,7 @@ from .drivers import DRIVER_LIVE, DRIVER_OFFLINE, OfflineDriver
 from .models import (
     AmendChangeIn,
     AuditEntry,
+    CorrectionEntry,
     Plan,
     PlanChange,
     PlanDiff,
@@ -54,6 +55,7 @@ from .models import (
     StepReportIn,
     Task,
     TaskStatus,
+    VerificationReport,
 )
 from .plandiff import diff_plans
 from .planner import (
@@ -64,6 +66,7 @@ from .planner import (
     summarize_steps,
 )
 from .policy import PlanRefusal
+from .reads import ConsoleReads
 from .roles import (
     DEFAULT_OPERATORS,
     DEFAULT_ROLES,
@@ -77,7 +80,7 @@ from .roles import (
     role_diff,
 )
 from .store import Store
-from .verify import verify_plan
+from .verify import run_verification
 
 
 def _now() -> str:
@@ -92,6 +95,10 @@ class CopilotService:
     def __init__(self, settings: Settings, store: Store) -> None:
         self.settings = settings
         self.store = store
+        # The console read surface over the same store: the API
+        # serves the console through it, and verification re-reads
+        # through it — never through the mutation path.
+        self.reads = ConsoleReads(store)
         self._lock = threading.Lock()
 
     # -- setup ------------------------------------------------------
@@ -623,26 +630,97 @@ class CopilotService:
         self._audit(task_id, DRIVER_LIVE, "execution_completed", {
             "driver": DRIVER_LIVE, "steps": len(plan.steps)})
         created_ids: dict[int, str] = {}
-        for memo in self.store.list_records("credit_memos"):
-            if memo.get("created_for_task") == task_id:
-                for step in plan.steps:
-                    if step.record_kind == "credit_memos":
-                        created_ids[step.seq] = str(memo["id"])
+        for memo in self.reads.memos_for_task(task_id):
+            for step in plan.steps:
+                if step.record_kind == "credit_memos":
+                    created_ids[step.seq] = str(memo["id"])
         return self._verify(task, plan, created_ids)
 
     # -- verification -------------------------------------------------------
     def _verify(self, task: Task, plan: Plan,
                 created_ids: dict[int, str]) -> Task:
-        result = verify_plan(self.store, plan, created_ids)
-        if result.ok:
+        """The verification act: re-read through the console read
+        surface, diff field by field plus the linkage checks, and
+        store the report as a record (kind `verifications`, keyed
+        by task id — the same records mechanism the roles ride).
+        The verdict also lands in the audit trail, as before."""
+        report = run_verification(
+            self.reads, plan, created_ids, task_id=task.task_id,
+            driver=task.driver or "",
+            audit=self.audit(task.task_id), verified_at=_now())
+        self.store.upsert_record("verifications", {
+            "id": task.task_id, **report.model_dump(mode="json")})
+        if report.ok:
             task.status = TaskStatus.VERIFIED
             self._save(task)
             self._audit(task.task_id, "verifier", "verification_passed", {
-                "plan_version": plan.version, "checked": result.checked})
+                "plan_version": plan.version, "checked": report.checked,
+                "read_path": report.read_path})
         else:
             task.status = TaskStatus.DISCREPANCY
             self._save(task)
             self._audit(task.task_id, "verifier", "verification_failed", {
-                "plan_version": plan.version, "checked": result.checked,
-                "diffs": [d.model_dump(mode="json") for d in result.diffs]})
+                "plan_version": plan.version, "checked": report.checked,
+                "read_path": report.read_path,
+                "diffs": [d.model_dump(mode="json") for d in report.diffs]})
         return task
+
+    def _stored_verification(
+            self, task_id: str) -> Optional[VerificationReport]:
+        """The report exactly as stored — no read-time composition."""
+        raw = self.store.get_record("verifications", task_id)
+        if raw is None:
+            return None
+        raw = {k: v for k, v in raw.items() if k != "id"}
+        return VerificationReport(**raw)
+
+    def get_verification(
+            self, task_id: str) -> Optional[VerificationReport]:
+        """The task's verification report, with its correction
+        chain composed at read time from the task records: the
+        corrective tasks this task spawned (via their
+        parent_task_id), each with its status and its own verdict.
+        The stored report is never rewritten — a discrepancy's
+        record stands as it was written, chain and all."""
+        report = self._stored_verification(task_id)
+        if report is None:
+            return None
+        report = report.model_copy(deep=True)
+        children = [t for t in self.list_tasks()
+                    if t.parent_task_id == task_id]
+        children.sort(key=lambda t: (t.created_at, t.task_id))
+        entries: list[CorrectionEntry] = []
+        for child in children:
+            child_report = self._stored_verification(child.task_id)
+            entries.append(CorrectionEntry(
+                task_id=child.task_id, status=child.status.value,
+                plan_version=child.plan_version,
+                verification_ok=(child_report.ok
+                                 if child_report else None)))
+        report.corrections = entries
+        return report
+
+    def verify_task(self, task_id: str, operator: str) -> VerificationReport:
+        """A request to verify (again). Verification is an act
+        with a record, not a recomputation: it ran once, at the end
+        of execution, and its report is the evidence. Asking again
+        is refused — recorded, like every refusal — whether the
+        task already has its report or has not executed at all."""
+        task = self._require_task(task_id)
+        report = self._stored_verification(task_id)
+        if report is not None:
+            self._audit(task_id, operator, "reverification_refused", {
+                "code": "already_verified",
+                "reason": "verification already ran and its report "
+                          "is recorded; a verdict is not recomputed",
+                "verified_at": report.verified_at,
+                "plan_version": report.plan_version})
+            raise GateError(
+                f"task {task_id} was already verified at "
+                f"{report.verified_at} against plan "
+                f"v{report.plan_version}; the recorded report is "
+                f"the evidence and verification is not re-run")
+        raise GateError(
+            f"task {task_id} has nothing to verify: verification "
+            f"runs at the end of execution and is recorded then "
+            f"(the task is {task.status.value})")
