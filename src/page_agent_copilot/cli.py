@@ -1,9 +1,10 @@
-"""Command line: seed the store, serve the console, or fold a
-day's operations digest.
+"""Command line: seed the store, serve the console, fold a
+day's operations digest, or serve the MCP surface.
 
     page-agent-copilot seed
     page-agent-copilot serve [--port 8000]
     page-agent-copilot digest [--date 2026-10-18]
+    page-agent-copilot mcp
 """
 
 from __future__ import annotations
@@ -32,6 +33,10 @@ def main() -> None:
         "--date", default=None,
         help="the day to summarise, YYYY-MM-DD (default: today, "
              "UTC)")
+    sub.add_parser(
+        "mcp",
+        help="serve the MCP surface over stdio: machine clients "
+             "submit tasks (planned + gated), never raw clicks")
     args = parser.parse_args()
 
     settings = Settings.from_env()
@@ -45,6 +50,11 @@ def main() -> None:
             "%Y-%m-%d")
         print(json.dumps(service.generate_digest(day, "cli"),
                          indent=2))
+        return
+    if args.cmd == "mcp":
+        from .mcp_server import main as mcp_main
+
+        mcp_main()
         return
     if args.cmd == "serve":
         import uvicorn
