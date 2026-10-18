@@ -1152,6 +1152,62 @@ class CopilotService:
             "raw": str(text), "normalized": normalized})
         return task
 
+    # -- the MCP door -----------------------------------------------------
+    # Round 17: machine clients (an MCP host — an IDE, a desktop
+    # assistant, another agent) submit work through these doors and
+    # no others. Each is the ordinary act plus one entry on the
+    # task's trail naming the channel, the way `intake_transcript`
+    # rides the intake it wraps: the planner, the role rules, and
+    # policy cannot tell an MCP submission from a typed one, and
+    # the trail can — every act the surface causes carries
+    # `channel: "mcp"` on its door entry. The surface itself
+    # (mcp_server.py) holds no logic of its own beyond the
+    # protocol: it cannot confirm, execute, amend, or touch a
+    # record, because no door here leads to those acts.
+
+    def submit_task_mcp(self, text: str, operator: str) -> Task:
+        """A task submitted by a machine client: ordinary intake,
+        with the door on the trail. A refusal lands exactly as it
+        does at the console — a REFUSED task carrying policy's or
+        the directory's own words — because it is the same intake
+        producing it."""
+        task = self.intake(text, operator)
+        self._audit(task.task_id, operator, "mcp_task_submitted", {
+            "channel": "mcp", "tool": "submit_task"})
+        return task
+
+    def instantiate_template_mcp(self, name: str,
+                                 version: Optional[int],
+                                 slots: dict[str, str],
+                                 operator: str) -> Task:
+        """A template task submitted by a machine client: ordinary
+        instantiation (slot validation, the rendered text through
+        the ordinary planner), with the door on the trail. Slot
+        refusals raise `TemplateError` before any task exists, as
+        they do at the API; the refusal is recorded in the library
+        scope by instantiation itself."""
+        task = self.instantiate_template(name, version, slots,
+                                         operator)
+        self._audit(task.task_id, operator, "mcp_template_submitted", {
+            "channel": "mcp", "tool": "submit_template_task",
+            "template": name, "version": task.template_version})
+        return task
+
+    def answer_clarification_mcp(self, task_id: str, operator: str,
+                                 choice: str) -> Task:
+        """A clarification answered by a machine client: the
+        ordinary recorded act — the answerer checked against the
+        directory and the planning rules, the choice required to
+        be one of the offered options — with the door on the
+        trail. A refused answer raises before the door entry is
+        written; the refusal itself is on the trail already,
+        recorded by `answer_clarification`."""
+        task = self.answer_clarification(task_id, operator, choice)
+        self._audit(task_id, operator, "mcp_clarification_answered", {
+            "channel": "mcp", "tool": "answer_clarification",
+            "answer": choice})
+        return task
+
     # -- reads ----------------------------------------------------------
     def get_task(self, task_id: str) -> Optional[Task]:
         raw = self.store.get_task(task_id)
