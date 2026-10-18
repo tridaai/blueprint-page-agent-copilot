@@ -87,6 +87,22 @@ evidence.
   acts, recorded with their diffs. A viewer plans, confirms,
   amends, and executes nothing; a customer's credit limit is a
   supervisor-only field.
+- **Identity and attribution** — the operator directory is
+  governed like the roles: enrolment, role assignment,
+  deactivation, and reactivation are recorded supervisor acts,
+  and names resolve normalised everywhere. Deactivation fails
+  closed — a deactivated name performs no act; planning,
+  confirming, amending, executing, recovering, and administering
+  all refuse it with `operator_inactive`, recorded. Its
+  unfinished work is never reassigned or deleted: it surfaces as
+  **orphaned work** until a supervisor picks it up as a recorded
+  act, and the original planner stays on the task. Every act in
+  the audit trail is attributable — an attribution check scans
+  the whole trail for an actor that resolves to no directory
+  name and no named system component, and the per-operator
+  report (acts by kind, tasks planned, confirmed, executed, and
+  the refusals each name received) is folded from the trail,
+  never counted separately.
 - **Two drivers, one step interface** — the real `page-agent`
   package in the operator's browser (live), and a deterministic
   offline driver (tests, evals, fallback), labelled honestly in
@@ -278,7 +294,19 @@ Plan versions stay readable
 renders the field-level diff between any two of them. The roles
 themselves are readable at `GET /api/roles`, editable by a
 supervisor at `PUT /api/roles/{name}`, and their edit history is
-at `GET /api/roles-audit`.
+at `GET /api/roles-audit`. The directory acts ride the same
+scope — `operator_enrolled`, `operator_role_changed`,
+`operator_deactivated`, `operator_reactivated`, and
+`directory_refused` — at `POST /api/operators`,
+`PUT /api/operators/{name}/role`,
+`POST /api/operators/{name}/deactivate`, and `/reactivate`.
+Orphaned work lists at `GET /api/operators/orphaned` and moves
+only through `POST /api/tasks/{id}/pickup` (`task_picked_up`,
+with `pickup_refused` recorded on a refusal). Executions name
+their executor on the attempt record and on the
+`execution_completed` entry, so `GET /api/operators/report` can
+fold each name's history from the trail, and
+`GET /api/attribution` runs the completeness check over it.
 
 ## Layout
 
@@ -307,7 +335,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (36 cases)
+evals/            the scripted-task gate (40 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -315,9 +343,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 129 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 145 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 36/36 cases: happy paths diffed exactly (including
+make evals   # 40/40 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -341,7 +369,14 @@ make evals   # 36/36 cases: happy paths diffed exactly (including
              # blocking the resume by name, a restart refused
              # once a create has landed, an abandonment with the
              # partial state named, and a second execute refused
-             # on a verified task and on one in flight alike
+             # on a verified task and on one in flight alike —
+             # and identity: enrolment, assignment, deactivation,
+             # and reactivation as recorded acts, a deactivated
+             # name refused at every act, its work orphaned and
+             # then completed through a supervisor's pickup, the
+             # attribution check at zero on a mixed run and
+             # naming planted rows, and the per-operator report
+             # reconciling with the trail it folds from
 ```
 
 ## Honest status

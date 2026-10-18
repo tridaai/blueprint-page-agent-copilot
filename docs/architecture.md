@@ -97,6 +97,52 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   make them, the edit must change something, and the who/when and
   the field-level diff land in the audit trail under the reserved
   `roles` scope (`GET /api/roles-audit`).
+- **Identity and attribution** (`roles.py`, `service.py`) — the
+  directory itself is governed data with a lifecycle, not a seed
+  constant. Enrolment, role assignment, deactivation, and
+  reactivation are recorded acts in the same `roles` audit scope,
+  each gated on an active `can_administer` holder; names are
+  normalised at enrolment and at every lookup, an enrolled name
+  cannot be enrolled twice, and the last active administrator
+  cannot be deactivated — a directory nobody can administer is a
+  lockout, not a governance act. A name is never deleted:
+  deactivation is an `active` flag on its entry, so its history
+  keeps resolving to it. Deactivation fails closed at every act
+  the shell offers — intake answers with a REFUSED task, and
+  confirm, amend, execute, resume, restart, abandon, corrective,
+  and the deviation acceptance refuse with `operator_inactive`,
+  recorded wherever that act records its refusals (reject and
+  re-plan, whose refusals were never recorded, refuse plainly).
+  Role edits and directory acts refuse a deactivated actor the
+  same way. What deactivation does *not* do is move work: a task
+  whose operator stands deactivated while it still owes that
+  operator an act (PLANNED, CONFIRMED, STALE, EXECUTION_FAILED)
+  is **orphaned work**, listed at `GET /api/operators/orphaned`
+  and in the console, and it moves only through a supervisor's
+  recorded **pickup**, which re-names the task's operator and
+  keeps the original planner on the task (`planned_by`,
+  `picked_up_from`). The planner-side execution check is
+  deliberately not an identity check — it re-checks the plan
+  against the planner's role definitions — because a deactivated
+  planner's confirmed work is exactly what pickup exists to
+  finish. Attribution closes the loop: attempts record their
+  executor and the execution audit entries carry it, the store
+  port scans the whole trail (`list_all_audit`), and two reads
+  fold from it — the **attribution check** (`attribution_check`,
+  `GET /api/attribution`), which names any act whose actor is
+  missing or resolves to neither a directory name (any state) nor
+  a governed system component (`SYSTEM_ACTORS`: `planner`,
+  `policy`, `verifier`, and the two driver names), and the
+  **per-operator report** (`GET /api/operators/report`), each
+  name's acts by kind, tasks planned/confirmed/executed, and
+  refusals received by code — folded from the trail on every
+  read, never kept as counters, so it cannot drift from what it
+  summarises. Two fold details are of their time and documented
+  in the code: a plan refusal is written under the `policy`
+  actor, so it counts for the task's planner, whom the task
+  record names; and executions from before this round carry no
+  executor on their entry, so those count for the task's
+  operator — the executor `execute` defaulted to then.
 - **State machine** (`service.py`) — DRAFT → PLANNED → CONFIRMED →
   VERIFIED / DISCREPANCY, with REFUSED as the plan-time terminal
   and DISCREPANCY_ACCEPTED as the deviation terminal (reached only
@@ -311,7 +357,15 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   or the landed create that decided it), `task_abandoned` (who,
   the mandatory reason, the partial state), `abandon_refused`,
   and `execution_refused` with code `attempt_in_flight` (a second
-  execution claimed while one was running).
+  execution claimed while one was running). The identity acts join
+  them: under the `roles` scope, `operator_enrolled`,
+  `operator_role_changed` (before and after), `operator_deactivated`,
+  `operator_reactivated`, and `directory_refused` (the act, the
+  target, the code); on the task, `task_picked_up` (from and to,
+  with the planner named) and `pickup_refused`; and
+  `execution_completed` / `execution_failed` now name the executor
+  alongside the driver. Deactivation refusals ride the acts' own
+  `*_refused` entries with code `operator_inactive`.
 
 ## The PageAgent API, as verified
 
@@ -401,6 +455,15 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   discipline binds the person — the name that planned a task is
   structurally unable to be the name that confirms it, whatever
   role either attempt claims.
+- **Deactivation strands work visibly; it never moves it.** A
+  deactivated operator's unfinished tasks stay exactly where they
+  were, under the deactivated name, until a supervisor picks one
+  up as a recorded act — there is no auto-reassignment and no
+  deletion, because silently moving a person's open work would
+  rewrite whose work it was. And the name itself is never
+  deleted, so the trail it left stays attributable: the
+  attribution check resolving a deactivated name is a pass, not a
+  finding.
 
 ## Production profile
 
