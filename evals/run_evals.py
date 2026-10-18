@@ -11,9 +11,12 @@ Exit 0 = PASS. Every case runs on a fresh in-memory store.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,7 +50,7 @@ from page_agent_copilot.records import (  # noqa: E402
     create_credit_memo,
 )
 from page_agent_copilot.service import CopilotService, GateError  # noqa: E402
-from page_agent_copilot.store import InMemoryStore  # noqa: E402
+from page_agent_copilot.store import InMemoryStore, SqlStore  # noqa: E402
 from page_agent_copilot.templates import TemplateError  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -2604,6 +2607,198 @@ def _():
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+class _McpWire:
+    """The MCP surface as a real client meets it: the server as
+    a subprocess on a SQLite file, JSON-RPC over stdio. The
+    human acts in these cases go through a second service on
+    the same file — the console's side of the split."""
+
+    def __init__(self, db_path: str):
+        env = dict(os.environ)
+        env["SQLITE_PATH"] = db_path
+        env["PYTHONPATH"] = str(
+            Path(__file__).resolve().parents[1] / "src")
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "page_agent_copilot.mcp_server"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env, text=True)
+        self._next = 0
+        hello = self.call("initialize", {
+            "protocolVersion": "2025-03-26", "capabilities": {},
+            "clientInfo": {"name": "evals", "version": "1"}})
+        expect(hello["result"]["serverInfo"]["name"]
+               == "page-agent-copilot",
+               f"handshake answered by {hello}")
+        self.proc.stdin.write(json.dumps(
+            {"jsonrpc": "2.0",
+             "method": "notifications/initialized"}) + "\n")
+        self.proc.stdin.flush()
+
+    def call(self, method, params=None):
+        self._next += 1
+        self.proc.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": self._next, "method": method,
+            "params": params or {}}) + "\n")
+        self.proc.stdin.flush()
+        while True:
+            line = self.proc.stdout.readline()
+            expect(line != "", "the MCP server closed the wire")
+            response = json.loads(line)
+            if response.get("id") == self._next:
+                return response
+
+    def tool(self, name, arguments=None):
+        response = self.call("tools/call", {
+            "name": name, "arguments": arguments or {}})
+        return response["result"]
+
+    def payload(self, name, arguments=None):
+        result = self.tool(name, arguments)
+        return json.loads(result["content"][0]["text"]), result
+
+    def close(self):
+        self.proc.terminate()
+        self.proc.wait(timeout=10)
+
+
+def _mcp_db() -> str:
+    return str(Path(tempfile.mkdtemp(prefix="mcp-eval-"))
+               / "copilot.db")
+
+
+@case("mcp: a task submitted over the wire plans; a human "
+      "confirms and executes off-surface; the verification "
+      "reads back over MCP")
+def _():
+    db = _mcp_db()
+    wire = _McpWire(db)
+    try:
+        payload, _ = wire.payload("submit_task", {
+            "text": CREDIT, "operator": "j.okafor"})
+        expect(payload["status"] == "PLANNED",
+               f"submitted task stands {payload['status']}")
+        task_id = payload["task_id"]
+
+        # the human split: confirmation and execution are NOT
+        # the client's to give — a second person confirms and
+        # the plan runs through the service the console uses,
+        # on the same store file the server is serving
+        human = CopilotService(Settings.from_env(),
+                               SqlStore("sqlite", db))
+        human.confirm(task_id, "s.hale")
+        human.execute(task_id, operator="j.okafor")
+
+        payload, _ = wire.payload("get_verification",
+                                  {"task_id": task_id})
+        expect(payload["status"] == "VERIFIED",
+               f"task stands {payload['status']}")
+        expect(payload["report"] is not None
+               and payload["report"]["ok"] is True,
+               "the stored verification reads back over MCP")
+        payload, _ = wire.payload("get_task", {"task_id": task_id})
+        expect(payload["ending"]["label"] == "verified",
+               f"ending reads {payload['ending']}")
+        payload, _ = wire.payload("get_task_audit",
+                                  {"task_id": task_id})
+        events = {e["event"]: e for e in payload["entries"]}
+        expect(events["mcp_task_submitted"]["detail"]["channel"]
+               == "mcp", "the trail names the channel")
+        expect("plan_confirmed" in events
+               and "mcp_task_submitted" in events,
+               "both doors are on the one trail")
+    finally:
+        wire.close()
+
+
+@case("mcp: a clarification is asked and answered over the "
+      "wire, by option value only")
+def _():
+    wire = _McpWire(_mcp_db())
+    try:
+        payload, _ = wire.payload("submit_task", {
+            "text": "raise a credit memo for the open invoice, "
+                    "reason damaged goods, $120",
+            "operator": "j.okafor"})
+        expect(payload["status"] == "AWAITING_CLARIFICATION",
+               f"ambiguous task stands {payload['status']}")
+        pending = payload["pending_clarification"]
+        expect(pending and len(pending["options"]) >= 2,
+               "the question rides the submission result")
+        result = wire.tool("answer_clarification", {
+            "task_id": payload["task_id"], "operator": "j.okafor",
+            "option": "the damaged one"})
+        expect(result["isError"]
+               and "is not one of the options"
+               in result["content"][0]["text"],
+               "free text is refused with the options restated")
+        payload, _ = wire.payload("answer_clarification", {
+            "task_id": payload["task_id"], "operator": "j.okafor",
+            "option": pending["options"][0]["value"]})
+        expect(payload["status"] == "PLANNED",
+               f"answered task stands {payload['status']}")
+    finally:
+        wire.close()
+
+
+@case("mcp: a click-shaped call is refused by name; a viewer "
+      "and a deactivated operator are refused as at any door")
+def _():
+    db = _mcp_db()
+    desk = CopilotService(Settings.from_env(),
+                          SqlStore("sqlite", db))
+    desk.seed()
+    desk.deactivate_operator("s.hale", "j.okafor")
+    wire = _McpWire(db)
+    try:
+        result = wire.tool("click_element",
+                           {"selector": "#save-button"})
+        expect(result["isError"], "a click call is an error")
+        expect("click_element" in result["content"][0]["text"],
+               "the refusal names the tool that is not offered")
+        payload, _ = wire.payload("submit_task", {
+            "text": CREDIT, "operator": "j.okafor"})
+        expect(payload["status"] == "REFUSED"
+               and payload["refusal_reason"].startswith(
+                   "operator_inactive:"),
+               f"deactivated over MCP: {payload['refusal_reason']}")
+        payload, _ = wire.payload("submit_task", {
+            "text": CREDIT, "operator": "v.ward"})
+        expect(payload["status"] == "REFUSED"
+               and payload["refusal_reason"].startswith(
+                   "role_cannot_plan:"),
+               f"viewer over MCP: {payload['refusal_reason']}")
+    finally:
+        wire.close()
+
+
+@case("mcp: the library lists over the wire, a template task "
+      "plans, and a bad slot refuses with its code")
+def _():
+    wire = _McpWire(_mcp_db())
+    try:
+        payload, _ = wire.payload("list_templates")
+        names = {t["name"] for t in payload["templates"]}
+        expect("credit-memo" in names,
+               f"library over MCP: {sorted(names)}")
+        payload, _ = wire.payload("submit_template_task", {
+            "name": "credit-memo", "operator": "j.okafor",
+            "slots": {"invoice": "4471", "reason": "damaged goods",
+                      "amount": "120"}})
+        expect(payload["status"] == "PLANNED",
+               f"template task stands {payload['status']}")
+        expect(payload["template_name"] == "credit-memo",
+               "the task names its template")
+        result = wire.tool("submit_template_task", {
+            "name": "credit-memo", "operator": "j.okafor",
+            "slots": {"invoice": "4471", "reason": "damaged goods"}})
+        expect(result["isError"]
+               and result["content"][0]["text"].startswith(
+                   "slot_missing:"),
+               "a missing slot refuses with its code, verbatim")
+    finally:
+        wire.close()
 
 
 def main() -> int:
