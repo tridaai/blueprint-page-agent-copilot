@@ -105,7 +105,10 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   not a transition of this one). Execution requires CONFIRMED; the
   check is in the service against the store, and the API maps the
   refusal to HTTP 409. A second execution of a started task is
-  likewise refused. Around that spine, plan depth adds three acts:
+  likewise refused. An execution whose driver step fails mid-plan
+  lands in EXECUTION_FAILED, which leaves only by the recovery
+  acts below (resume, restart, abandon — abandon closing it as
+  ABANDONED). Around that spine, plan depth adds three acts:
   - **Amend** (PLANNED only): the amendment becomes plan version
     n+1 — prior versions are kept and marked superseded — with the
     field-level changes recorded in the audit; the task stays
@@ -125,6 +128,10 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
     as a new version with fresh preconditions; the stale version
     is kept, readable, marked superseded. If the records no longer
     support a plan, the task is REFUSED with the planner's reason.
+  And failure recovery adds its three, under **Attempts and
+  failure recovery** below: **resume** and **restart** (both
+  EXECUTION_FAILED only, each a new numbered attempt) and
+  **abandon** (EXECUTION_FAILED → ABANDONED, with a reason).
 - **Drivers** (`drivers.py`) — one step interface, two drivers:
   - `offline`: applies each step through `records.py`, recording
     before/after field values. Deterministic; the driver of tests
@@ -134,6 +141,14 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
     screen, calls `agent.execute(step.instruction)`, and posts a
     step report. When the last step lands, the shell verifies. The
     report's `ok` is recorded but never consulted by the verifier.
+  A step from either driver can fail — the outcome carries `ok`
+  False and the driver's error verbatim (for the live bridge, a
+  step report with `ok` False). The shell stops the execution at
+  that step; nothing after it runs. The offline driver carries a
+  `fail` hook beside `tamper` — a map of step seq to the error to
+  fail with — so the eval pack can arm the failures a real console
+  produces (an element not found, a form rejected, a timeout)
+  deterministically.
 - **Console read surface** (`reads.py`) — the read functions the
   API's console GET endpoints serve from: records in their served
   (JSON) shape, plus the console's own derivations (an invoice's
@@ -211,6 +226,54 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
     task, and the accepted diffs (from the stored report) in the
     `deviation_accepted` audit entry. The report stands as
     written.
+- **Attempts and failure recovery** (`service.py`) — every
+  execution is a numbered **attempt**, a stored record (kind
+  `executions`): the driver, the plan version, the mode
+  (`execute`, `resume`, `restart`), every step outcome it
+  produced with before/after values, and — on failure — the
+  failed step, the driver's error verbatim, and `state_lines`
+  naming the state the attempt left in place. An attempt still
+  `running` is the task's execution claim: the claim is taken
+  under the service lock, so a second execute/resume/restart
+  while one is in flight is refused (`attempt_in_flight`,
+  recorded) — for the offline driver an attempt finishes inside
+  its call, and for the live bridge it spans the step reports,
+  which is exactly the in-flight window. When a step fails, the
+  attempt closes as failed and the task lands in
+  EXECUTION_FAILED with the failed step and error mirrored on
+  it; no verification runs, nothing is rolled back, and the
+  completed steps stand. From there, three recorded acts, each
+  decided in code before anything runs:
+  - **Resume**: run only the steps that never completed, as a
+    new attempt under the failed attempt's driver (a live resume
+    re-arms the bridge for the remaining steps). First, two
+    basis checks (`service._basis_problems`): every completed
+    step's post-state still stands — a SET step's field still
+    holds the value it left, a CREATE step's record still exists
+    with its planned fields — and every record the remaining
+    steps rest on still hashes to the plan's preconditions,
+    except records a completed step itself wrote (covered by
+    the first check). A moved basis refuses the resume
+    (`resume_refused`, `basis_moved`) and names what moved: the
+    shell never writes over a change it cannot account for. The
+    executor's role is re-checked exactly as at execution. A
+    resumed execution verifies over the whole plan, gathering
+    created records from every attempt the execution counts.
+  - **Restart**: run the plan again from step 1, as a new
+    attempt — refused once any CREATE step has completed
+    (`restart_refused`, `create_already_applied`), because a
+    created record is never created twice; a plan in that state
+    can only be resumed. The same role and basis checks run
+    first: the state must still be exactly the plan's
+    preconditions plus the completed steps' writes, so a
+    restart's SET steps re-apply their own values onto state
+    that provably has not moved.
+  - **Abandon**: an operator whose role may execute closes the
+    task as ABANDONED, with a mandatory reason. The partial
+    state is not cleaned up: the completed steps' writes stay on
+    the records, named in the final attempt's state lines and in
+    the `task_abandoned` audit entry, and the task records who
+    abandoned it and why.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -239,7 +302,16 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   spawner's role does not fit, or the differences are already
   corrected), `deviation_accepted` (who, the mandatory reason,
   the diffs accepted), and `deviation_refused` (not a supervisor,
-  or no reason given).
+  or no reason given). Failure recovery adds: `step_failed` (the
+  step, the attempt, the driver's error verbatim),
+  `execution_failed` (the attempt, the completed steps, the
+  partial state named line by line), `execution_started` for a
+  resumed or restarted attempt (its mode and the steps it will
+  run), `resume_refused` / `restart_refused` (the basis problem
+  or the landed create that decided it), `task_abandoned` (who,
+  the mandatory reason, the partial state), `abandon_refused`,
+  and `execution_refused` with code `attempt_in_flight` (a second
+  execution claimed while one was running).
 
 ## The PageAgent API, as verified
 
@@ -289,6 +361,16 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   DISCREPANCY_ACCEPTED with the report still naming every
   difference. No path turns a discrepancy into a VERIFIED after
   the fact.
+- **A failure is a state, not an exception, and partial work is
+  never hidden.** A driver step that fails stops the execution
+  and is recorded — the attempt, the task state, the audit — with
+  the driver's error verbatim; it never surfaces as an unhandled
+  error that strands the task, and never as a partial success.
+  What the completed steps wrote stands, named line by line, and
+  the only ways forward are the recorded acts (resume, restart,
+  abandon), each of which re-checks the world before writing:
+  resume and restart refuse a basis that moved underneath the
+  completed work rather than writing over it.
 - **Verification happens once.** It is an act with a record, run
   at the end of execution; asking for it again is a recorded
   refusal, not a recomputation — a verdict that could be re-run

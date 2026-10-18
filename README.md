@@ -49,8 +49,10 @@ evidence.
 - **Governed task shell** — intake → plan → confirm gate → execute →
   verify → audit, with the state machine enforced in code against
   the store (DRAFT → PLANNED → CONFIRMED → VERIFIED / DISCREPANCY /
-  REFUSED, plus STALE and REJECTED below, and DISCREPANCY_ACCEPTED
-  where a supervisor accepts a named deviation). Executing an
+  REFUSED, plus STALE and REJECTED below, DISCREPANCY_ACCEPTED
+  where a supervisor accepts a named deviation, and
+  EXECUTION_FAILED → ABANDONED where a run stops mid-plan and is
+  closed, or picked up again — see Failure recovery). Executing an
   unconfirmed plan is refused (HTTP 409).
 - **Multi-record plans** — one task can compose one plan across
   records: a credit memo with the invoice settled in the same plan,
@@ -115,6 +117,25 @@ evidence.
   rewritten to VERIFIED. A difference no plan can close (a memo
   created with wrong values — created records are never edited
   by a plan) refuses the corrective spawn, on the record.
+- **Failure recovery** — a step can fail mid-plan: an element
+  the in-page agent cannot find, a form the console rejects, a
+  bridge that times out. The execution stops at that step —
+  never a partial success, never an unhandled error that strands
+  the task — and the task lands in EXECUTION_FAILED with the
+  failed step and the driver's error verbatim. Every execution
+  is a numbered **attempt**, a stored record of the steps it
+  completed with their before/after values; a running attempt is
+  the task's claim, so a second execution while one is in flight
+  is refused. From a failure there are three recorded exits.
+  **Resume** runs only the steps that never completed, after
+  code re-checks that the completed steps' post-state still
+  stands and that the records the remaining steps rest on have
+  not moved — a basis that moved refuses the resume and names
+  what moved. **Restart** runs the plan again from step 1 as a
+  new attempt, and is refused once a CREATE step has completed:
+  a created record is never created twice. **Abandon** closes
+  the task as ABANDONED with a mandatory reason; the partial
+  state stays on the records, named, never cleaned up quietly.
 - **Audit trail** — every step logged: plan version, confirmer,
   per-step before/after values, the driver that ran it, and the
   verification result. Readable via API and in the console.
@@ -242,7 +263,16 @@ of the plan itself: `plan_amended` (with the recorded changes),
 they raise: `confirmation_refused`, `amendment_refused`,
 `execution_refused`. So are the discrepancy acts:
 `corrective_spawned`, `corrective_refused`, `deviation_accepted`,
-`deviation_refused`. Plan versions stay readable
+`deviation_refused`. And the failure acts: `step_failed` and
+`execution_failed` (the failed step, the driver's error verbatim,
+the completed steps, the partial state named line by line),
+`resume_refused` and `restart_refused` (the basis that moved, or
+the create that already landed), `task_abandoned` (who, the
+reason, the partial state left standing) and `abandon_refused`.
+The attempt records behind them are readable at
+`GET /api/tasks/{id}/attempts` and in the task detail; the exits
+are `POST /api/tasks/{id}/resume`, `/restart`, and `/abandon`.
+Plan versions stay readable
 (`GET /api/tasks/{id}/plans`), and
 `GET /api/tasks/{id}/plan-diff?from_version=1&to_version=2`
 renders the field-level diff between any two of them. The roles
@@ -277,7 +307,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (30 cases)
+evals/            the scripted-task gate (36 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -285,9 +315,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 105 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 129 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 30/30 cases: happy paths diffed exactly (including
+make evals   # 36/36 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -303,7 +333,15 @@ make evals   # 30/30 cases: happy paths diffed exactly (including
              # linkage checks, a corrective task closing the diffs
              # with the chain on the parent's report, a deviation
              # accepted by a supervisor with a reason (never
-             # VERIFIED), and re-verification refused
+             # VERIFIED), and re-verification refused — and
+             # failure recovery: a mid-plan failure accounted
+             # exactly (failed step, the driver's error verbatim,
+             # completed steps standing), a resume that runs only
+             # what is left, a completed step changed underneath
+             # blocking the resume by name, a restart refused
+             # once a create has landed, an abandonment with the
+             # partial state named, and a second execute refused
+             # on a verified task and on one in flight alike
 ```
 
 ## Honest status
@@ -315,8 +353,13 @@ make evals   # 30/30 cases: happy paths diffed exactly (including
   (constructor config and `execute()` result shape are quoted in
   `docs/architecture.md`), and the shell side of the live path —
   arming, step reports, verification — is fully covered by tests
-  and evals that simulate the browser's reports. The offline driver
-  is the default everywhere until a live run is on record.
+  and evals that simulate the browser's reports. One live-path
+  behaviour follows from that split: when a step reports failure,
+  the shell stops the execution (EXECUTION_FAILED) and refuses
+  the bridge's later reports, so the run halts in the shell; a
+  resume re-arms the task for the remaining steps only. The
+  offline driver is the default everywhere until a live run is
+  on record.
 - The **PostgreSQL store leg skips** until the local stack is up
   (env-gated, same as the sibling blueprints); the migration follows
   the established dual-dialect pattern and the SQLite dialect is
