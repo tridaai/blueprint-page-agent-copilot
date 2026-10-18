@@ -172,6 +172,24 @@
       <span class="note" id="pub-note"></span>
     </div>
     <div class="panel">
+      <h3>Batches</h3>
+      <p class="note">Work submitted together, worked one task at a time. A batch groups the
+        tasks from one submission — the task lines below, or template instantiations over
+        the API — and holds their ids in submission order. It decides nothing: there is no
+        batch confirm and no batch run, here or anywhere. Every member is confirmed and
+        executed as its own task, under the same gates, and a member that refuses at plan
+        time stays in the batch with its reason showing. The run sheet names the next act
+        each member needs and who may take it; the report folds the outcome from the member
+        records — the credited total is read from the members' verification reports, never
+        from their plans.</p>
+      <div class="field"><label for="batch-lines">Task lines</label>
+        <textarea id="batch-lines" placeholder="one task per line — e.g. raise a credit memo for invoice 4471, reason damaged goods, $120"></textarea></div>
+      <button class="act" id="batch-create">Create batch</button>
+      <span class="note" id="batch-note"></span>
+      <div id="batch-list" class="diff" style="margin-top:10px;"></div>
+      <div id="batch-sheet"></div>
+    </div>
+    <div class="panel">
       <h3>Roles</h3>
       <p class="note">Who may do what is governed data, enforced by the shell at plan time, at
         confirmation, and again at execution. A plan is confirmed by a second person — never its

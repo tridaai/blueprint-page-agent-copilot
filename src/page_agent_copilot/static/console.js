@@ -298,6 +298,113 @@
     if (res.ok) await refreshTemplates();
   });
 
+  // Batches: work submitted together, worked one task at a
+  // time. The panel states a list of task lines as one batch
+  // (template members ride the API), then shows each batch's
+  // run sheet — every member's state, the next act it needs,
+  // and who may take it — and its report, both folded by the
+  // shell from the member records. There is no batch act here
+  // either: the acts the sheet names are taken on the member
+  // tasks, in the task view, one at a time.
+  let batchData = [];
+  async function refreshBatches() {
+    batchData = await api("/api/batches");
+    const div = $("batch-list");
+    if (!batchData.length) {
+      div.textContent = "No batches yet.";
+      return;
+    }
+    div.innerHTML = "";
+    batchData.forEach((b) => {
+      const row = document.createElement("div");
+      row.className = "field";
+      const label = document.createElement("label");
+      label.textContent = b.batch_id;
+      row.appendChild(label);
+      const text = document.createElement("span");
+      text.textContent =
+        `${b.status} — ${b.members_terminal}/${b.members_total} ` +
+        `members in a terminal state · created by ${b.created_by}`;
+      row.appendChild(text);
+      const btn = document.createElement("button");
+      btn.className = "act secondary";
+      btn.textContent = "Run sheet & report";
+      btn.addEventListener("click", () => openBatch(b.batch_id));
+      row.appendChild(btn);
+      div.appendChild(row);
+    });
+  }
+  async function openBatch(batchId) {
+    const [sheet, report] = await Promise.all([
+      api(`/api/batches/${batchId}/run-sheet`),
+      api(`/api/batches/${batchId}/report`)]);
+    const box = $("batch-sheet");
+    box.innerHTML = "";
+    const head = document.createElement("h3");
+    head.style.marginTop = "16px";
+    head.textContent = `Batch ${sheet.batch_id} — ${sheet.status}`;
+    box.appendChild(head);
+    sheet.members.forEach((m) => {
+      const row = document.createElement("div");
+      row.className = "field";
+      const label = document.createElement("label");
+      label.textContent = `#${m.position}`;
+      row.appendChild(label);
+      const text = document.createElement("span");
+      const what = m.kind === "template"
+        ? `template ${m.template_name} v${m.template_version}`
+        : "task";
+      text.textContent =
+        `${m.task_id || "(no task)"} · ${m.status} · ${what}: ` +
+        `${m.text || ""} — next: ` +
+        (m.next_act.action
+          ? `${m.next_act.detail} (who: ${m.next_act.who})`
+          : m.next_act.detail);
+      row.appendChild(text);
+      if (m.task_id) {
+        const btn = document.createElement("button");
+        btn.className = "act secondary";
+        btn.textContent = "Open task";
+        btn.addEventListener("click", () => openTask(m.task_id));
+        row.appendChild(btn);
+      }
+      box.appendChild(row);
+    });
+    const rep = document.createElement("div");
+    rep.className = "diff";
+    rep.style.marginTop = "8px";
+    const counts = Object.entries(report.counts_by_state)
+      .map(([k, v]) => `${k} ×${v}`).join(" · ");
+    rep.textContent =
+      `Report: ${report.complete ? "complete" : "open"} — ` +
+      `${counts} · total credited (from verification reports) ` +
+      `${report.total_credited} · discrepancies open ` +
+      `${report.discrepancies_open.length} · failures ` +
+      `${report.failures.length}` +
+      (report.owing_acts.length
+        ? ` · still owing acts: ` +
+          report.owing_acts.map((o) => o.task_id).join(", ")
+        : "");
+    box.appendChild(rep);
+  }
+  $("batch-create").addEventListener("click", async () => {
+    const members = $("batch-lines").value.split("\n")
+      .map((line) => line.trim()).filter(Boolean)
+      .map((text) => ({ text }));
+    const res = await fetch("/api/batches", json("POST", {
+      operator: asOperator(), members }));
+    const body = await res.json().catch(() => ({}));
+    $("batch-note").textContent = res.ok
+      ? `Batch ${body.batch_id} created — ${body.members_total} ` +
+        `member(s). Confirm and run each member as its own task.`
+      : "Refused: " + (body.detail || `-> ${res.status}`);
+    if (res.ok) {
+      $("batch-lines").value = "";
+      await refreshAll();
+      openBatch(body.batch_id);
+    }
+  });
+
   function showScreen(name) {
     document.querySelectorAll("nav button").forEach((b) =>
       b.classList.toggle("active", b.dataset.screen === name));
@@ -785,7 +892,8 @@
     await Promise.all([refreshOrders(), refreshCustomers(),
                        refreshInvoices(), refreshTasks(),
                        refreshRoles(), refreshOrphaned(),
-                       refreshReport(), refreshTemplates()]);
+                       refreshReport(), refreshTemplates(),
+                       refreshBatches()]);
   }
   refreshAll();
 

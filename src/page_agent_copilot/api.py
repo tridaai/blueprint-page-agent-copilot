@@ -18,6 +18,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .batches import BatchCreateIn, BatchError
 from .config import Settings
 from .logging_setup import new_request_id, setup_logging
 from .models import (
@@ -99,6 +100,14 @@ def create_app(settings: Optional[Settings] = None,
     async def role_error(_: Request, exc: RoleError):
         # A role definition that does not validate (or names no
         # role): refused whole, nothing stored.
+        return JSONResponse(status_code=422, content={
+            "detail": exc.message, "code": exc.code})
+
+    @app.exception_handler(BatchError)
+    async def batch_error(_: Request, exc: BatchError):
+        # A batch submission that does not validate (no members,
+        # or a member naming both a text and a template, or
+        # neither): refused whole, nothing stated, nothing stored.
         return JSONResponse(status_code=422, content={
             "detail": exc.message, "code": exc.code})
 
@@ -509,6 +518,56 @@ def create_app(settings: Optional[Settings] = None,
     @app.get("/api/templates-audit")
     def templates_audit():
         return service.template_audit()
+
+    # -- batches ------------------------------------------------------
+    # A batch groups tasks submitted together. Creation states
+    # each member through ordinary intake; the other routes are
+    # reads — the run sheet and the report, both folded from the
+    # member records. There is deliberately NO batch decision
+    # route: no /confirm, no /execute, nothing that acts on the
+    # members as a group. Confirmation and execution stay per
+    # task, at /api/tasks/{task_id}/..., under the same gates.
+    @app.post("/api/batches", status_code=201)
+    def create_batch(body: BatchCreateIn):
+        batch = service.create_batch(body.operator, body.members)
+        return service.batch_view(batch)
+
+    @app.get("/api/batches")
+    def batches():
+        return [service.batch_view(b) for b in service.list_batches()]
+
+    @app.get("/api/batches/{batch_id}")
+    def batch(batch_id: str):
+        found = service.get_batch(batch_id)
+        if found is None:
+            raise KeyError(f"batch {batch_id} does not exist")
+        return service.batch_view(found)
+
+    @app.get("/api/batches/{batch_id}/run-sheet")
+    def batch_run_sheet(batch_id: str):
+        # The work list: each member's state, the next act it
+        # needs, and who may take it. The sheet names acts; the
+        # acts themselves are taken on the member tasks.
+        found = service.get_batch(batch_id)
+        if found is None:
+            raise KeyError(f"batch {batch_id} does not exist")
+        return service.batch_run_sheet(found)
+
+    @app.get("/api/batches/{batch_id}/report")
+    def batch_report(batch_id: str):
+        # Folded from the member records at the moment of
+        # asking: counts by state, the credited total from the
+        # verified members' verification reports, the
+        # discrepancies and failures still open, and whether
+        # the batch is complete or who still owes an act.
+        found = service.get_batch(batch_id)
+        if found is None:
+            raise KeyError(f"batch {batch_id} does not exist")
+        return service.batch_report(found)
+
+    @app.get("/api/batches-audit")
+    def batches_audit():
+        return service.batch_audit()
 
     @app.post("/api/tasks/{task_id}/steps/{seq}/report")
     def report_step(task_id: str, seq: int, body: StepReportIn):
