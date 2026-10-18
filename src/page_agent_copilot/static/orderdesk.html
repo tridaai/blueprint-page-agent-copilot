@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OrderDesk — Northgate Distribution</title>
+<style>
+  body { font-family: "Segoe UI", Arial, sans-serif; background:#F4F4F6; color:#0A0A0A; margin:0; font-size:14px; }
+  header { background:#0A0A0A; color:#fff; padding:10px 18px; display:flex; align-items:baseline; gap:14px; }
+  header .brand { font-size:19px; font-weight:700; letter-spacing:.4px; }
+  header .sub { color:#B9B9C9; font-size:12px; }
+  header .badge { margin-left:auto; background:#4F46E5; color:#fff; border-radius:999px; padding:3px 10px; font-size:11px; text-transform:uppercase; letter-spacing:.8px; }
+  nav { background:#E8E8EF; border-bottom:2px solid #4F46E5; padding:0 12px; display:flex; gap:4px; }
+  nav button { background:none; border:none; padding:9px 14px; font-size:13px; cursor:pointer; text-transform:uppercase; letter-spacing:.6px; }
+  nav button.active { background:#fff; font-weight:700; border-top:3px solid #4F46E5; }
+  main { padding:16px 18px 40px; max-width:1080px; margin:0 auto; }
+  h2 { font-size:16px; margin:4px 0 10px; }
+  table { border-collapse:collapse; width:100%; background:#fff; border:1px solid #C9C9D4; }
+  th { background:#ECECF3; text-align:left; padding:6px 8px; border:1px solid #C9C9D4; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  td { padding:6px 8px; border:1px solid #DDDDE6; }
+  tr.clickable { cursor:pointer; } tr.clickable:hover { background:#F0F0FF; }
+  .panel { background:#fff; border:1px solid #C9C9D4; padding:14px 16px; margin-top:14px; }
+  .panel h3 { margin:0 0 10px; font-size:14px; }
+  .field { margin:7px 0; display:flex; gap:10px; align-items:center; }
+  .field label { width:130px; font-weight:600; font-size:13px; }
+  .field input, .field select { flex:1; padding:6px 8px; border:1px solid #A9A9B8; font-size:14px; }
+  .field .ro { color:#555; font-size:13px; }
+  button.act { background:#4F46E5; color:#fff; border:none; padding:8px 14px; cursor:pointer; font-size:13px; border-radius:3px; }
+  button.act.secondary { background:#fff; color:#4F46E5; border:1px solid #4F46E5; }
+  button.act:disabled { background:#A9A9B8; cursor:not-allowed; }
+  .chip { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:.4px; }
+  .chip.VERIFIED { background:#DFF5E1; color:#14632A; } .chip.DISCREPANCY { background:#FBE0E0; color:#8F1D1D; }
+  .chip.REFUSED { background:#FBE0E0; color:#8F1D1D; } .chip.CONFIRMED { background:#E2E0FF; color:#3730A3; }
+  .chip.PLANNED { background:#FFF3CD; color:#7A5B00; } .chip.DRAFT { background:#E8E8EF; color:#444; }
+  textarea { width:100%; min-height:56px; padding:8px; font-size:14px; border:1px solid #A9A9B8; }
+  .steps { margin:8px 0; padding-left:20px; } .steps li { margin:4px 0; }
+  .audit { font-family:"Consolas", monospace; font-size:12px; background:#0A0A0A; color:#D8D8E8; padding:10px 12px; white-space:pre-wrap; max-height:260px; overflow:auto; }
+  .note { color:#555; font-size:12.5px; } .err { color:#8F1D1D; font-weight:600; }
+  footer { max-width:1080px; margin:0 auto; padding:0 18px 30px; color:#555; font-size:12.5px; display:flex; gap:18px; align-items:center; }
+  footer img { height:22px; } footer a { color:#4F46E5; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">OrderDesk</span>
+  <span class="sub">Northgate Distribution — operations console (est. 2009)</span>
+  <span class="badge">Blueprint demo</span>
+</header>
+<nav>
+  <button data-screen="orders" class="active">Orders</button>
+  <button data-screen="customers">Customers</button>
+  <button data-screen="invoices">Invoices</button>
+  <button data-screen="copilot">Copilot tasks</button>
+</nav>
+<main>
+  <!-- ORDERS -->
+  <section id="screen-orders">
+    <h2>Orders</h2>
+    <table id="orders-table"><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Status</th><th>Ship date</th><th>Carrier</th></tr></thead><tbody></tbody></table>
+    <div class="panel" id="order-form-panel" hidden>
+      <h3>Order <span id="order-id-label"></span></h3>
+      <form id="order-form">
+        <div class="field"><label for="ord-status">Status</label>
+          <select id="ord-status"><option>placed</option><option>packed</option><option>shipped</option><option>delivered</option><option>cancelled</option></select></div>
+        <div class="field"><label for="ord-ship-date">Ship date</label><input id="ord-ship-date" type="text"></div>
+        <div class="field"><label for="ord-carrier">Carrier</label><input id="ord-carrier" type="text"></div>
+        <button class="act" type="submit">Save order</button>
+        <span class="note" id="order-save-note"></span>
+      </form>
+    </div>
+  </section>
+
+  <!-- CUSTOMERS -->
+  <section id="screen-customers" hidden>
+    <h2>Customers</h2>
+    <table id="customers-table"><thead><tr><th>Customer</th><th>Name</th><th>Email</th><th>Phone</th><th>City</th><th>Credit limit</th></tr></thead><tbody></tbody></table>
+    <div class="panel" id="customer-form-panel" hidden>
+      <h3>Customer <span id="customer-id-label"></span></h3>
+      <form id="customer-form">
+        <div class="field"><label for="cust-name">Name</label><input id="cust-name" type="text"></div>
+        <div class="field"><label for="cust-email">Email</label><input id="cust-email" type="text"></div>
+        <div class="field"><label for="cust-phone">Phone</label><input id="cust-phone" type="text"></div>
+        <div class="field"><label for="cust-address">Address</label><input id="cust-address" type="text"></div>
+        <div class="field"><label for="cust-city">City</label><input id="cust-city" type="text"></div>
+        <div class="field"><label for="cust-postcode">Postcode</label><input id="cust-postcode" type="text"></div>
+        <div class="field"><label for="cust-credit-limit">Credit limit</label><input id="cust-credit-limit" type="text"></div>
+        <div class="field"><label>Bank account</label><span class="ro" id="cust-bank">—</span> <span class="note">(payment field, read-only)</span></div>
+        <div class="field"><label>Card on file</label><span class="ro" id="cust-card">—</span> <span class="note">(payment field, read-only)</span></div>
+        <div class="field"><label>Note</label><span class="ro" id="cust-note"></span></div>
+        <button class="act" type="submit">Save customer</button>
+        <span class="note" id="customer-save-note"></span>
+      </form>
+    </div>
+  </section>
+
+  <!-- INVOICES -->
+  <section id="screen-invoices" hidden>
+    <h2>Invoices</h2>
+    <table id="invoices-table"><thead><tr><th>Invoice</th><th>Customer</th><th>Amount</th><th>Status</th><th>Due date</th><th>Memo</th></tr></thead><tbody></tbody></table>
+    <div class="panel" id="invoice-form-panel" hidden>
+      <h3>Invoice <span id="invoice-id-label"></span></h3>
+      <form id="invoice-form">
+        <div class="field"><label for="inv-status">Status</label>
+          <select id="inv-status"><option>open</option><option>paid</option><option>overdue</option><option>void</option></select></div>
+        <div class="field"><label for="inv-due-date">Due date</label><input id="inv-due-date" type="text"></div>
+        <div class="field"><label for="inv-memo">Memo</label><input id="inv-memo" type="text"></div>
+        <button class="act" type="submit">Save invoice</button>
+        <span class="note" id="invoice-save-note"></span>
+      </form>
+      <h3 style="margin-top:18px;">Credit memo for this invoice</h3>
+      <form id="credit-memo-form">
+        <input type="hidden" id="cm-invoice-id">
+        <input type="hidden" id="cm-task-id">
+        <div class="field"><label for="cm-reason">Reason</label><input id="cm-reason" type="text"></div>
+        <div class="field"><label for="cm-amount">Amount</label><input id="cm-amount" type="text"></div>
+        <button class="act" type="submit">Issue credit memo</button>
+        <span class="note" id="cm-note"></span>
+      </form>
+      <div id="cm-list" class="note" style="margin-top:10px;"></div>
+    </div>
+  </section>
+
+  <!-- COPILOT -->
+  <section id="screen-copilot" hidden>
+    <h2>Copilot tasks</h2>
+    <p class="note">State the job in plain words. The copilot drafts a field-level plan from the
+      records; nothing runs until a named operator confirms the plan; afterwards the shell
+      re-reads the records and diffs them against the plan — the agent's own word is never
+      the evidence. Deletes, credits above the cap, and payment-field changes are refused
+      at plan time.</p>
+    <div class="panel">
+      <h3>New task</h3>
+      <div class="field"><label for="task-operator">Operator</label><input id="task-operator" type="text" value="j.okafor"></div>
+      <textarea id="task-text" placeholder="e.g. raise a credit memo for invoice 4471, reason damaged goods, $120"></textarea>
+      <div style="margin-top:8px;"><button class="act" id="task-create">Draft plan</button>
+      <span class="note" id="task-create-note"></span></div>
+    </div>
+    <div class="panel">
+      <h3>Tasks</h3>
+      <table id="tasks-table"><thead><tr><th>Task</th><th>Text</th><th>Status</th><th>Operator</th><th>Driver</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel" id="task-detail" hidden>
+      <h3>Task <span id="task-id-label"></span> — <span id="task-status-chip"></span></h3>
+      <div id="task-refusal" class="err"></div>
+      <div id="task-plan"></div>
+      <div style="margin-top:10px; display:flex; gap:8px;">
+        <button class="act" id="task-confirm">Confirm plan</button>
+        <button class="act secondary" id="task-run-offline">Run — offline driver</button>
+        <button class="act secondary" id="task-run-live">Run — in-page agent (PageAgent)</button>
+      </div>
+      <p class="note" id="driver-note">Offline driver: deterministic, runs in the shell against the same
+        records — it is not PageAgent. In-page agent: the real <i>page-agent</i> package running in
+        this browser; it needs a configured model endpoint (PAGEAGENT_* settings) and fills the
+        actual forms on these screens.</p>
+      <div id="task-verify" style="margin-top:8px;"></div>
+      <h3 style="margin-top:16px;">Audit trail</h3>
+      <div class="audit" id="task-audit"></div>
+    </div>
+  </section>
+</main>
+<footer>
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI">
+  <span>Trida AI Blueprint — Page Agent Admin Copilot</span>
+  <a href="https://trida.ai/blog?category=blueprints">Visit Trida AI →</a>
+  <a href="https://trida.ai/blog?category=blueprints">View all blueprints →</a>
+</footer>
+<script src="/static/vendor/page-agent.bundle.js"></script>
+<script src="/static/console.js"></script>
+<script src="/static/copilot.js"></script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+{"dependencies":{"page-agent":"1.12.4"},"description":"Bundles the pinned page-agent package for the OrderDesk console's live bridge.","devDependencies":{"esbuild":"0.28.2"},"name":"page-agent-copilot-frontend","private":true,"scripts":{"build":"node build.mjs"},"type":"module","version":"0.1.0"}
