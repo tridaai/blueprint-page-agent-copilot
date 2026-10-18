@@ -49,8 +49,9 @@ evidence.
 - **Governed task shell** — intake → plan → confirm gate → execute →
   verify → audit, with the state machine enforced in code against
   the store (DRAFT → PLANNED → CONFIRMED → VERIFIED / DISCREPANCY /
-  REFUSED, plus STALE and REJECTED below). Executing an unconfirmed
-  plan is refused (HTTP 409).
+  REFUSED, plus STALE and REJECTED below, and DISCREPANCY_ACCEPTED
+  where a supervisor accepts a named deviation). Executing an
+  unconfirmed plan is refused (HTTP 409).
 - **Multi-record plans** — one task can compose one plan across
   records: a credit memo with the invoice settled in the same plan,
   an order shipped with its date and carrier, status changes naming
@@ -88,9 +89,32 @@ evidence.
   package in the operator's browser (live), and a deterministic
   offline driver (tests, evals, fallback), labelled honestly in
   every audit entry it produces.
-- **Verification in code** — post-execution diff of record state
-  against the approved plan. A wrong write is a DISCREPANCY naming
-  the fields; the task is never reported successful.
+- **Verification in code, at depth** — after execution the shell
+  re-reads every touched record through the console's own read
+  surface (the same functions the API serves to a human's
+  browser — never the mutation path the work went in by, never
+  the agent's report) and diffs it against the approved plan:
+  every planned field, plus linkage checks that the records hang
+  together (a created memo names its invoice, its customer, and
+  the task that created it; the invoice lists the memo back; a
+  touched record still names a customer that exists; the audit's
+  execution record agrees with the state found). The verdict is a
+  stored **verification report** — per-field and per-linkage
+  verdicts, the read path named — and verification happens once:
+  asking again is refused, because the report is the evidence,
+  not a recomputation.
+- **Discrepancy workflow** — a DISCREPANCY task has exactly two
+  recorded exits, and no silent third. A **corrective task**: a
+  linked follow-up (the link recorded both ways) whose plan is
+  derived to close only the named differences, run through the
+  full plan → confirm → execute → verify cycle under the same
+  role rules; the parent's report shows the correction chain and
+  is never edited. Or **accept deviation**: a supervisor-only
+  act with a mandatory reason, closing the task as
+  DISCREPANCY_ACCEPTED — a distinct terminal state, never
+  rewritten to VERIFIED. A difference no plan can close (a memo
+  created with wrong values — created records are never edited
+  by a plan) refuses the corrective spawn, on the record.
 - **Audit trail** — every step logged: plan version, confirmer,
   per-step before/after values, the driver that ran it, and the
   verification result. Readable via API and in the console.
@@ -172,14 +196,42 @@ value.
 
 ## Verification and audit
 
-After either driver runs, `verify.py` compares every planned field
-against the store, step by step in plan order: SET steps against
-the record's current value, CREATE steps against the created
-record's fields. A mismatch names its step as well as its field.
-The browser bridge's step reports are written to the audit as
-reports — the verdict comes from the diff, and an eval case proves
-a bridge that reports success while doing nothing still lands in
-DISCREPANCY.
+After either driver runs, `verify.py` re-reads the records
+through the console read surface (`reads.py` — the read functions
+the API serves to the console, returning records in their served
+shape) and compares, step by step in plan order: every planned
+field (SET steps against the record's current value, CREATE steps
+against the created record's fields), and the linkage checks — a
+created credit memo names the task that created it, names the
+customer of the invoice it was planned against, and appears on
+that invoice's own memo list (the console's rule for showing it);
+the invoice's customer exists; a touched order or invoice still
+names a customer that exists; and the execution record in the
+audit trail (who ran the step, when) agrees with the state the
+re-read found. The store underneath is one source of truth — the
+independence is the path: neither the mutation path nor the
+bridge's step reports are consulted, and an eval case proves a
+bridge that reports success while doing nothing still lands in
+DISCREPANCY, as does a record written again after the work.
+
+The verdict is stored as a **verification report**
+(`GET /api/tasks/{id}/verification`, and in the task detail and
+the console's task view): plan version, driver, the read path
+(`console_read_surface`), a verdict per field check and per
+linkage check, and the diffs — field failures first, then linkage
+failures under their field names. Verification is an act with a
+record, not a recomputation: `POST /api/tasks/{id}/verify` after
+the fact is refused (409, recorded as `reverification_refused`).
+
+A task in DISCREPANCY leaves by exactly two recorded exits:
+`POST /api/tasks/{id}/corrective` spawns the corrective task (its
+plan derived from the report, closing only the named differences;
+it confirms, executes, and verifies as its own task, and the
+parent report's `corrections` chain shows it), and
+`POST /api/tasks/{id}/accept-deviation` records a supervisor's
+acceptance with its reason and closes the task
+DISCREPANCY_ACCEPTED. The original report is never edited by
+either exit.
 
 Every task's audit (`GET /api/tasks/{id}/audit`) carries the plan
 version, the confirming operator, each step's before/after values,
@@ -188,7 +240,9 @@ of the plan itself: `plan_amended` (with the recorded changes),
 `plan_rejected`, `execution_stale` (with the changed records), and
 `plan_replanned`. Permission refusals are recorded too, before
 they raise: `confirmation_refused`, `amendment_refused`,
-`execution_refused`. Plan versions stay readable
+`execution_refused`. So are the discrepancy acts:
+`corrective_spawned`, `corrective_refused`, `deviation_accepted`,
+`deviation_refused`. Plan versions stay readable
 (`GET /api/tasks/{id}/plans`), and
 `GET /api/tasks/{id}/plan-diff?from_version=1&to_version=2`
 renders the field-level diff between any two of them. The roles
@@ -209,7 +263,10 @@ src/page_agent_copilot/
   roles.py        roles as governed records: pages, field allowlists,
                   action classes, the strict loader, the checks
   drivers.py      the step interface + the deterministic offline driver
-  verify.py       post-state diff against the approved plan
+  reads.py        the console read surface: the reads the API serves,
+                  and the only path verification re-reads through
+  verify.py       the verification act: field + linkage checks over
+                  the re-read, producing the stored report
   store.py        the store port: in-memory / SQLite / PostgreSQL
   records.py      the one mutation path for OrderDesk state
   dataset.py      the OrderDesk seed data (generated in code; gold
@@ -220,7 +277,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (25 cases)
+evals/            the scripted-task gate (30 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -228,19 +285,25 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 84 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 105 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 25/25 cases: happy paths diffed exactly (including
+make evals   # 30/30 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
              # version binding, a policy-breaking amendment refused,
              # a stale plan refused before writing anything, the
              # live bridge graded on store state, not its report —
-             # and the permissions set: a viewer cannot plan, a
+             # the permissions set: a viewer cannot plan, a
              # supervisor-only field refused for an operator,
              # self-confirmation refused, a role narrowed after
-             # confirmation blocking execution, role edits audited
+             # confirmation blocking execution, role edits audited —
+             # and verification depth: a post-work write caught by
+             # the re-read, a memo on the wrong invoice named by its
+             # linkage checks, a corrective task closing the diffs
+             # with the chain on the parent's report, a deviation
+             # accepted by a supervisor with a reason (never
+             # VERIFIED), and re-verification refused
 ```
 
 ## Honest status
