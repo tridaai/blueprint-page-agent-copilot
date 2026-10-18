@@ -255,23 +255,60 @@
   }
   async function refreshTemplates() {
     libraryData = await api("/api/templates");
-    $("library-list").textContent = libraryData.map((t) =>
-      `${t.name} v${t.version}${t.current ? "" : " (superseded)"} — ` +
-      `${t.description} · health: ` +
-      (t.health.ok ? "OK — examples derive to their pinned shape"
-                   : "BROKEN — " + t.health.examples
-                       .filter((e) => !e.ok)
-                       .map((e) => e.detail).join("; ")) +
-      ` · pattern: ${t.pattern}`).join("\n");
+    $("library-list").textContent = libraryData.map((t) => {
+      const standing = t.default
+        ? (t.promoted ? " · DEFAULT (promoted)" : " · DEFAULT (seeded)")
+        : ` · standing: ${t.standing}`;
+      const evaluation = t.evaluation
+        ? ` · evaluated: ${t.evaluation.ok ? "pass" : "fail"} by ` +
+          `${t.evaluation.evaluated_by} (hash ` +
+          `${t.evaluation.hash_short}` +
+          `${t.evaluation.hash_matches ? "" : ", stale"})`
+        : " · not evaluated";
+      return `${t.name} v${t.version}${t.current ? "" : " (superseded)"} — ` +
+        `${t.description} · health: ` +
+        (t.health.ok ? "OK — examples derive to their pinned shape"
+                     : "BROKEN — " + t.health.examples
+                         .filter((e) => !e.ok)
+                         .map((e) => e.detail).join("; ")) +
+        standing + evaluation +
+        ` · pattern: ${t.pattern}`;
+    }).join("\n");
     const pick = $("library-pick");
     const before = pick.value;
     pick.innerHTML = libraryData.map((t) =>
       `<option value="${libraryKey(t)}">${t.name} v${t.version}` +
-      `${t.current ? "" : " (superseded)"}</option>`).join("");
+      `${t.current ? "" : " (superseded)"}` +
+      `${t.default ? " — default" : ""}</option>`).join("");
     if (libraryData.some((t) => libraryKey(t) === before))
       pick.value = before;
     renderLibrarySlots();
   }
+  // The regression gate's two acts, on the picked version, in
+  // the operator named above — the shell enforces every rule
+  // (the publisher may neither vouch nor promote) and the
+  // refusal shows here in the server's own words, like every
+  // other refusal in this console.
+  async function gateOnTemplate(path, done) {
+    const t = pickedTemplate();
+    if (!t) return;
+    const res = await fetch(`/api/templates/${t.name}/${path}`,
+      json("POST", { operator: asOperator(), version: t.version }));
+    const body = await res.json().catch(() => ({}));
+    $("library-note").textContent = res.ok ? done(t, body)
+      : "Refused: " + (body.detail || `-> ${res.status}`);
+    if (res.ok) await refreshTemplates();
+  }
+  $("library-evaluate").addEventListener("click", async () => {
+    await gateOnTemplate("evaluate", (t, body) =>
+      `Evaluated ${t.name} v${t.version}: ` +
+      (body.ok ? "pass" : "fail") +
+      ` — recorded against hash ${body.content_hash.slice(0, 12)}.`);
+  });
+  $("library-promote").addEventListener("click", async () => {
+    await gateOnTemplate("promote", (t) =>
+      `${t.name} v${t.version} is now the default.`);
+  });
   $("library-pick").addEventListener("change", renderLibrarySlots);
   $("library-create").addEventListener("click", async () => {
     const t = pickedTemplate();
