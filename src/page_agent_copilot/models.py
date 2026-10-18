@@ -187,6 +187,12 @@ class Task(BaseModel):
     stale_records: list[str] = Field(default_factory=list)
     refusal_reason: Optional[str] = None
     driver: Optional[str] = None
+    # The library template this task was instantiated from, when
+    # it was: the name and the exact version used — never merely
+    # "the latest", because a version a task names is the version
+    # whose pattern produced its text. A typed task carries None.
+    template_name: Optional[str] = None
+    template_version: Optional[int] = None
     # The correction chain, recorded both ways: a corrective task
     # names the task whose discrepancy spawned it here, and that
     # task lists the corrective in `corrective_task_ids`.
