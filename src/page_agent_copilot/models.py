@@ -193,6 +193,12 @@ class Task(BaseModel):
     # whose pattern produced its text. A typed task carries None.
     template_name: Optional[str] = None
     template_version: Optional[int] = None
+    # The batch this task was submitted in, when it was: the one
+    # thing members of a batch share. A batch groups tasks for
+    # attention — the run sheet, the report — and decides nothing
+    # about any of them; every gate on this task is the ordinary
+    # per-task one. A task stated on its own carries None.
+    batch_id: Optional[str] = None
     # The correction chain, recorded both ways: a corrective task
     # names the task whose discrepancy spawned it here, and that
     # task lists the corrective in `corrective_task_ids`.

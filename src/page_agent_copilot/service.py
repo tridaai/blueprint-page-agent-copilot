@@ -105,6 +105,25 @@ derive — and a version's health is computed from them on read,
 against the seeded records: a planner or policy change that
 breaks a template's examples marks that version broken in the
 library, by name and version.
+
+Batches (batches.py, round 8) group tasks that were submitted
+together — the morning list, stated as one submission of task
+texts and template instantiations. A batch is a record of the
+submission and nothing more: it holds the member task ids in
+submission order and the creator, and everything else about it
+is folded from the member records at read time. There is no
+batch act beside creating one — no batch confirmation, no
+batch execution — because the gates in this shell are per task
+by design: a confirmation binds one plan version, by one named
+second person. The batch's two reads, a run sheet (each
+member's state, the next act it needs, and who may take it) and
+a report (counts by state, the credited total from the
+members' verification reports, the discrepancies and failures
+still open), organise the desk's attention across the list;
+every act they name is then taken on the member task itself,
+through the ordinary doors. Members share nothing but the
+batch id — one member's staleness, failure, or discrepancy
+never touches another's lifecycle.
 """
 
 from __future__ import annotations
@@ -113,9 +132,18 @@ import threading
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
-from decimal import InvalidOperation
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
+from .batches import (
+    BATCH_AUDIT_SCOPE,
+    TERMINAL_STATUSES,
+    Batch,
+    BatchError,
+    BatchMemberIn,
+    BatchMemberRecord,
+    next_act_for,
+)
 from .config import Settings
 from .drivers import DRIVER_LIVE, DRIVER_OFFLINE, OfflineDriver
 from .models import (
@@ -2306,3 +2334,295 @@ class CopilotService:
                 "refusals_by_code": dict(sorted(refusals.items())),
             })
         return report
+
+    # -- batches -------------------------------------------------------
+    def _batch_refused(self, operator: str, code: str,
+                       reason: str) -> None:
+        self._audit(BATCH_AUDIT_SCOPE, operator, "batch_refused", {
+            "code": code, "reason": reason})
+
+    def create_batch(self, operator: str,
+                     members: list[BatchMemberIn]) -> Batch:
+        """State a list of work as one batch: each member, in
+        submission order, through the ordinary doors — a task
+        text through `intake`, a template member through
+        `instantiate_template`, which itself renders and intakes.
+        The batch adds no gate and bypasses none: the role rules
+        and policy apply to every member exactly as they do to a
+        task stated on its own, and a member that refuses is IN
+        the batch with its refusal — a refused task as a REFUSED
+        member, and a template member whose slots do not
+        validate as a member carrying instantiation's refusal,
+        no task created. The batch record is written once,
+        holding what creation produced; it is never edited
+        afterwards, and it stores no status — completion is a
+        fold over the members, read fresh every time.
+
+        A malformed submission — no members at all, or a member
+        naming both a text and a template, or neither — is
+        refused whole, recorded, before any member is stated:
+        a bad list is not a batch with members silently missing.
+        """
+        if not members:
+            reason = ("a batch names no members; there is "
+                      "nothing to submit together")
+            self._batch_refused(operator, "no_members", reason)
+            raise BatchError("no_members", f"refused: {reason}")
+        for position, member in enumerate(members, start=1):
+            has_text = bool((member.text or "").strip())
+            has_template = bool((member.template or "").strip())
+            if has_text == has_template:
+                reason = (f"member {position} names "
+                          f"{'both a task text and a template' if has_text else 'neither a task text nor a template'}; "
+                          f"a member is one or the other")
+                self._batch_refused(operator, "member_invalid",
+                                    reason)
+                raise BatchError("member_invalid",
+                                 f"refused: {reason}")
+        batch_id = f"BATCH-{uuid.uuid4().hex[:8].upper()}"
+        records: list[BatchMemberRecord] = []
+        for position, member in enumerate(members, start=1):
+            task: Optional[Task] = None
+            if (member.text or "").strip():
+                task = self.intake(member.text or "", operator)
+                record = BatchMemberRecord(
+                    position=position, kind="text",
+                    task_id=task.task_id, text=task.text)
+            else:
+                try:
+                    task = self.instantiate_template(
+                        member.template or "", member.version,
+                        dict(member.slots), operator)
+                    record = BatchMemberRecord(
+                        position=position, kind="template",
+                        task_id=task.task_id, text=task.text,
+                        template_name=task.template_name,
+                        template_version=task.template_version)
+                except TemplateError as err:
+                    # Instantiation refused before a task
+                    # existed — the refusal is already recorded
+                    # in the library's scope by instantiate
+                    # itself; the member carries it here so the
+                    # batch shows the whole submission.
+                    record = BatchMemberRecord(
+                        position=position, kind="template",
+                        template_name=member.template,
+                        template_version=member.version,
+                        refusal_code=err.code,
+                        refusal_reason=err.message)
+            if task is not None:
+                task.batch_id = batch_id
+                self.store.put_task(task.model_dump(mode="json"))
+                self._audit(task.task_id, operator, "batch_member", {
+                    "batch_id": batch_id, "position": position,
+                    "kind": record.kind})
+            records.append(record)
+        batch = Batch(batch_id=batch_id, created_by=operator,
+                      created_at=_now(), members=records)
+        self.store.upsert_record("batches", {
+            "id": batch_id, **batch.model_dump(mode="json")})
+        self._audit(BATCH_AUDIT_SCOPE, operator, "batch_created", {
+            "batch_id": batch_id,
+            "members": [r.model_dump(mode="json") for r in records]})
+        return batch
+
+    def get_batch(self, batch_id: str) -> Optional[Batch]:
+        raw = self.store.get_record("batches", batch_id)
+        if raw is None:
+            return None
+        raw = {k: v for k, v in raw.items() if k != "id"}
+        return Batch(**raw)
+
+    def list_batches(self) -> list[Batch]:
+        batches = []
+        for raw in self.store.list_records("batches"):
+            raw = {k: v for k, v in raw.items() if k != "id"}
+            batches.append(Batch(**raw))
+        return sorted(batches,
+                      key=lambda b: (b.created_at, b.batch_id))
+
+    def batch_audit(self) -> list[dict]:
+        return self.store.list_audit(BATCH_AUDIT_SCOPE)
+
+    def _member_row(self, member: BatchMemberRecord) -> dict:
+        """One member as the batch's reads show it: what
+        creation recorded, joined with the member task's state
+        as it stands NOW — the join is the point, so a sheet
+        printed an hour later shows the work as it is, not as
+        it was submitted. A member that never became a task
+        stands REFUSED with instantiation's reason, terminal,
+        owing nothing."""
+        row: dict = {
+            "position": member.position,
+            "kind": member.kind,
+            "task_id": member.task_id,
+            "text": member.text,
+            "template_name": member.template_name,
+            "template_version": member.template_version,
+        }
+        if member.task_id is None:
+            row.update({
+                "status": TaskStatus.REFUSED.value,
+                "terminal": True,
+                "refusal_reason": (f"{member.refusal_code}: "
+                                   f"{member.refusal_reason}"),
+                "next_act": {
+                    "action": None,
+                    "detail": ("complete — refused before a task "
+                               "existed; nothing was stated"),
+                    "who": None},
+            })
+            return row
+        task = self.get_task(member.task_id)
+        if task is None:  # a stored member naming no task: say so
+            row.update({
+                "status": "MISSING",
+                "terminal": False,
+                "refusal_reason": None,
+                "next_act": {
+                    "action": None,
+                    "detail": ("the member names a task the store "
+                               "does not hold"),
+                    "who": None},
+            })
+            return row
+        row.update({
+            "status": task.status.value,
+            "terminal": task.status in TERMINAL_STATUSES,
+            "operator": task.operator,
+            "planned_by": task.planned_by or task.operator,
+            "plan_version": task.plan_version,
+            "refusal_reason": task.refusal_reason,
+            "failed_step": task.failed_step,
+            "failure_error": task.failure_error,
+            "next_act": next_act_for(task),
+        })
+        return row
+
+    def _derived_status(self, rows: list[dict]) -> str:
+        """A batch is complete exactly when every member stands
+        in a terminal state; otherwise it is open, and the reads
+        name the members still owing acts. Folded from the rows
+        on every read — never stored on the batch."""
+        return ("complete"
+                if all(r["terminal"] for r in rows) else "open")
+
+    def batch_view(self, batch: Batch) -> dict:
+        """The batch as the API and console serve it: the stored
+        record, its members joined with their live states and
+        next acts (the run sheet's rows), and the derived
+        status folded over them."""
+        rows = [self._member_row(m) for m in batch.members]
+        view = batch.model_dump(mode="json")
+        view["members"] = rows
+        view["status"] = self._derived_status(rows)
+        view["members_total"] = len(rows)
+        view["members_terminal"] = sum(
+            1 for r in rows if r["terminal"])
+        return view
+
+    def batch_run_sheet(self, batch: Batch) -> dict:
+        """The run sheet: the batch as a work list. Each member
+        with its state, the next act it needs, and who may take
+        that act — every act named here is taken on the member
+        task itself, through the ordinary per-task doors; the
+        sheet takes none of them."""
+        rows = [self._member_row(m) for m in batch.members]
+        return {
+            "batch_id": batch.batch_id,
+            "created_by": batch.created_by,
+            "created_at": batch.created_at,
+            "status": self._derived_status(rows),
+            "members": rows,
+            "owing": [r["task_id"] for r in rows
+                      if not r["terminal"]],
+        }
+
+    def batch_report(self, batch: Batch) -> dict:
+        """The batch report, folded from the member records —
+        never from anything the batch stored about outcomes,
+        because it stores none. Counts by state; the credited
+        total summed from the VERIFIED members' stored
+        verification reports (the amount checks the re-read
+        passed, never the plans' values — a member whose
+        execution landed in DISCREPANCY contributes nothing,
+        however good its plan looked); the discrepancies still
+        open, with their diffs and correction chains; the
+        failures, with their steps and errors; the refusals,
+        with their reasons; and whether the batch is complete,
+        or the members still owing acts, named."""
+        rows = [self._member_row(m) for m in batch.members]
+        counts: Counter = Counter(r["status"] for r in rows)
+        credited: list[dict] = []
+        total = Decimal("0.00")
+        discrepancies: list[dict] = []
+        failures: list[dict] = []
+        refused: list[dict] = []
+        owing: list[dict] = []
+        for member, row in zip(batch.members, rows):
+            if not row["terminal"]:
+                owing.append({
+                    "task_id": row["task_id"],
+                    "position": row["position"],
+                    "status": row["status"],
+                    "next_act": row["next_act"]["action"]})
+            if row["task_id"] is None:
+                refused.append({
+                    "position": row["position"], "task_id": None,
+                    "reason": row["refusal_reason"]})
+                continue
+            task = self.get_task(row["task_id"])
+            if task is None:
+                continue
+            if task.status == TaskStatus.REFUSED:
+                refused.append({
+                    "position": row["position"],
+                    "task_id": task.task_id,
+                    "reason": task.refusal_reason})
+            elif task.status == TaskStatus.DISCREPANCY:
+                report = self.get_verification(task.task_id)
+                discrepancies.append({
+                    "task_id": task.task_id,
+                    "diffs": ([d.model_dump(mode="json")
+                               for d in report.diffs]
+                              if report else []),
+                    "corrections": (
+                        [c.model_dump(mode="json")
+                         for c in report.corrections]
+                        if report else []),
+                })
+            elif task.status == TaskStatus.EXECUTION_FAILED:
+                failures.append({
+                    "task_id": task.task_id,
+                    "failed_step": task.failed_step,
+                    "failure_error": task.failure_error})
+            if task.status == TaskStatus.VERIFIED:
+                report = self._stored_verification(task.task_id)
+                if report is not None and report.ok:
+                    member_total = Decimal("0.00")
+                    for check in report.field_checks:
+                        if (check.record_kind == "credit_memos"
+                                and check.field == "amount"
+                                and check.verdict == "match"
+                                and check.actual is not None):
+                            member_total += Decimal(check.actual)
+                    if member_total > 0:
+                        credited.append({
+                            "task_id": task.task_id,
+                            "credited": str(member_total)})
+                        total += member_total
+        return {
+            "batch_id": batch.batch_id,
+            "created_by": batch.created_by,
+            "created_at": batch.created_at,
+            "complete": all(r["terminal"] for r in rows),
+            "status": self._derived_status(rows),
+            "members": len(rows),
+            "counts_by_state": dict(sorted(counts.items())),
+            "total_credited": str(total),
+            "credited": credited,
+            "discrepancies_open": discrepancies,
+            "failures": failures,
+            "refused": refused,
+            "owing_acts": owing,
+        }
