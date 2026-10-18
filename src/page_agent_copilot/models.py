@@ -243,6 +243,26 @@ class ReplanIn(BaseModel):
 
 class ExecuteIn(BaseModel):
     driver: str = "offline"  # "offline" | "page-agent-live"
+    # Who is executing. Optional: an omitted executor is the task's
+    # own operator (the planner running their confirmed plan). The
+    # executor's role is re-checked at execution either way.
+    operator: Optional[str] = None
+
+
+class RoleUpdateIn(BaseModel):
+    """A recorded role edit: the full replacement definition, and
+    the operator making the change (who must hold a role with
+    can_administer). The definition passes the strict loader in
+    roles.py before anything is stored."""
+
+    operator: str
+    pages: list[str] = Field(default_factory=list)
+    fields: dict[str, list[str]] = Field(default_factory=dict)
+    can_plan: bool = False
+    can_confirm: bool = False
+    can_amend: bool = False
+    can_execute: bool = False
+    can_administer: bool = False
 
 
 class StepReportIn(BaseModel):
