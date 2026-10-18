@@ -1202,6 +1202,119 @@ def _():
            "accepting a deviation rewrote the credited total")
 
 
+# -- Round 9: audit exports, hash-chained --------------------------
+# One scope's trail as a single ordered document: every entry
+# chained by SHA-256 over the previous hash and its own content,
+# under a header naming the scope, the exporter, the count, and
+# the final hash. An edited, dropped, reordered, or truncated
+# copy fails verification at the first broken entry. Exporting
+# is a recorded act behind the identity gate, and the document
+# covers the trail as it stood — never its own export entry.
+
+@case("audit export: a completed task's trail verifies intact")
+def _():
+    from page_agent_copilot.exports import verify_export
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    trail_len = len(svc.audit(task.task_id))
+    doc = svc.export_task_audit(task.task_id, "s.hale")
+    expect(doc["scope"] == {"kind": "task", "id": task.task_id},
+           f"scope {doc['scope']}")
+    expect(doc["entry_count"] == trail_len, "count != trail")
+    expect(all(e["event"] != "audit_exported" for e in doc["entries"]),
+           "the document contains its own export entry")
+    verdict = verify_export(doc)
+    expect(verdict["ok"] and verdict["entries"] == trail_len,
+           f"verdict {verdict}")
+    # The act is on the trail, naming the document it produced.
+    last = svc.audit(task.task_id)[-1]
+    expect(last["event"] == "audit_exported"
+           and last["detail"]["final_hash"] == doc["final_hash"],
+           f"last entry {last}")
+
+
+@case("audit export: a batch chains member trails in true order")
+def _():
+    from page_agent_copilot.exports import verify_export
+    svc = fresh()
+    batch = svc.create_batch("op", [
+        BatchMemberIn(text=CREDIT),
+        BatchMemberIn(text="mark order 1032 as shipped"),
+    ])
+    first, second = (m.task_id for m in batch.members)
+    svc.confirm(first, "s.hale")
+    svc.execute(first, "offline")
+    member_ids = {first, second}
+    expected = [
+        (e["task_id"], e["event"])
+        for e in svc.store.list_all_audit()
+        if e["task_id"] in member_ids
+        or (e["task_id"] == "batches"
+            and (e.get("detail") or {}).get("batch_id")
+            == batch.batch_id)]
+    doc = svc.export_batch_audit(batch.batch_id, "s.hale")
+    expect([(e["task_id"], e["event"]) for e in doc["entries"]]
+           == expected, "the chain order is not the trail's order")
+    expect(verify_export(doc)["ok"], "batch chain does not verify")
+
+
+@case("audit export: a tampered copy fails at the broken entry")
+def _():
+    import copy
+    from page_agent_copilot.exports import verify_export
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "offline")
+    doc = svc.export_task_audit(task.task_id, "s.hale")
+    edited = copy.deepcopy(doc)
+    edited["entries"][2]["detail"]["plan_version"] = 99
+    verdict = verify_export(edited)
+    expect(not verdict["ok"] and verdict["broken_at"] == 3,
+           f"edited: {verdict}")
+    dropped = copy.deepcopy(doc)
+    del dropped["entries"][2]
+    verdict = verify_export(dropped)
+    expect(not verdict["ok"] and verdict["broken_at"] == 3,
+           f"dropped: {verdict}")
+    cut = copy.deepcopy(doc)
+    cut["entries"] = cut["entries"][:-1]
+    verdict = verify_export(cut)
+    expect(not verdict["ok"]
+           and verdict["broken_at"] == len(cut["entries"]) + 1,
+           f"truncated: {verdict}")
+
+
+@case("audit export: a deactivated operator cannot export")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    svc.deactivate_operator("s.hale", "op")
+    try:
+        svc.export_task_audit(task.task_id, "op")
+        expect(False, "a deactivated operator exported a trail")
+    except GateError:
+        pass
+    refusals = [e for e in svc.audit(task.task_id)
+                if e["event"] == "export_refused"]
+    expect(refusals
+           and refusals[0]["detail"]["code"] == "operator_inactive",
+           f"refusals {refusals}")
+    # A stranger is refused the same way, with its own code.
+    try:
+        svc.export_task_audit(task.task_id, "ghost")
+        expect(False, "an unknown name exported a trail")
+    except GateError:
+        pass
+    codes = [e["detail"]["code"] for e in svc.audit(task.task_id)
+             if e["event"] == "export_refused"]
+    expect(codes == ["operator_inactive", "unknown_operator"],
+           f"codes {codes}")
+
+
 def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     for name, ok, detail in RESULTS:
