@@ -78,7 +78,7 @@ DELETE_RE = re.compile(r"\b(delete|remove|erase|destroy)\b", re.I)
 CREDIT_RE = re.compile(r"credit\s+memo", re.I)
 INVOICE_RE = re.compile(r"invoice\s+(\d+)", re.I)
 AMOUNT_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{1,2})?)")
-REASON_RE = re.compile(r"reason[:\s]+(.+?)(?=,?\s*\$|,?\s*$)", re.I | re.S)
+REASON_START_RE = re.compile(r"reason[:\s]+", re.I)
 # One status clause: "mark order 1032 as shipped". A task may carry
 # several (a compound plan); finditer collects them in text order.
 STATUS_CLAUSE_RE = re.compile(
@@ -155,6 +155,23 @@ def _require_record(store: Store, kind: str, record_id: str) -> dict:
     return record
 
 
+def _credit_reason(text: str, amt: re.Match) -> str:
+    """The credit memo's reason: the words between "reason" and
+    the amount the plan credits. Slicing to that amount — rather
+    than stopping at the first $-figure — keeps a figure named
+    inside the reason ("refund of $50 overcharge") in the reason,
+    where it is data. When the amount precedes the reason in the
+    sentence, the reason runs to the end of the text."""
+    start = REASON_START_RE.search(text)
+    if start is None:
+        return ""
+    if amt.start() >= start.end():
+        raw = text[start.end():amt.start()]
+    else:
+        raw = text[start.end():]
+    return raw.strip().strip(",").strip()
+
+
 def _plan_credit_memo(text: str, store: Store, policy: Policy,
                       task_id: str) -> Plan:
     inv = INVOICE_RE.search(text)
@@ -165,16 +182,24 @@ def _plan_credit_memo(text: str, store: Store, policy: Policy,
             "(e.g. 'invoice 4471')")
     invoice_id = inv.group(1)
     _require_record(store, "invoices", invoice_id)
-    amt = AMOUNT_RE.search(text)
-    if not amt:
+    amounts = list(AMOUNT_RE.finditer(text))
+    if not amounts:
         raise PlanRefusal(
             "no_plan_derivable",
             "refused: a credit memo task must state its amount "
             "(e.g. '$120'); the planner never invents an amount")
+    # The amount is the task's LAST figure. Every governed shape
+    # states it after the reason ("reason damaged goods, $120"),
+    # so a figure named inside the reason ("refund of $50
+    # overcharge, $120") is reason text — data about the credit,
+    # never the amount. Reading the first figure instead let the
+    # reason silently redirect the money: the round-10 red team
+    # found that text planning a $50 memo under a stated $120 (and
+    # a stated $900 slipping under the cap behind a $50).
+    amt = amounts[-1]
     amount = money(amt.group(1).replace(",", ""))
     check_credit(amount, policy)
-    rsn = REASON_RE.search(text)
-    reason = rsn.group(1).strip().strip(",").strip() if rsn else ""
+    reason = _credit_reason(text, amt)
     if not reason:
         raise PlanRefusal(
             "no_plan_derivable",
