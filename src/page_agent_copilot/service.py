@@ -2215,7 +2215,11 @@ class CopilotService:
                 "plan_version": task.plan_version,
                 "text": task.text,
             })
-        return sorted(orphaned, key=lambda o: o["task_id"])
+        # In the task list's order — creation order, the work
+        # stranded longest first. (Sorting these rows by their
+        # random task ids, as this once did, undid that order
+        # and made the read a coin flip.)
+        return orphaned
 
     def pickup_task(self, task_id: str, operator: str) -> Task:
         """Pick up a deactivated operator's orphaned task: a
