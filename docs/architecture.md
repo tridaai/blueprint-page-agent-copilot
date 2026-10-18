@@ -54,12 +54,16 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   two versions of a task's plan: added, removed, or changed with
   field-level old/new values. Rendered by the API
   (`/api/tasks/{id}/plan-diff`) and the console's compare view.
-- **Policy** (`policy.py`) — plan-time refusals: deletes
+- **Policy** (`policy.py`, values in `config.py`) — plan-time refusals: deletes
   (`delete_refused`), credits above the governed cap
   (`credit_above_cap`, default $500, `COPILOT_CREDIT_CAP`), payment
   fields on any record (`payment_field`), non-allowlisted fields
   (`field_not_plannable`), ungoverned status values
-  (`value_not_governed`), missing records (`record_not_found`).
+  (`value_not_governed`), missing records (`record_not_found`),
+  and a derived plan longer than the governed plan-step ceiling
+  (`plan_too_large`, default 25 steps, `COPILOT_MAX_PLAN_STEPS`),
+  checked in the planner's one entry point so every door that
+  derives a plan faces it.
 - **Roles** (`roles.py`) — who may do what, held as governed data,
   not conditionals. A role record names the console pages it may
   work on, the record fields its plans may touch per kind, and its
@@ -451,6 +455,44 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
     the records, named in the final attempt's state lines and in
     the `task_abandoned` audit entry, and the task records who
     abandoned it and why.
+- **Budgets** (`config.py` Policy, enforced in `service.py`) —
+  per-task ceilings, enforced in the shell, at the moments they
+  bind. The plan-step ceiling refuses at plan time (above). Each
+  execution attempt snapshots the two execution ceilings in
+  force when it is claimed — `max_execution_steps` (default 40,
+  `COPILOT_MAX_EXECUTION_STEPS`) and `max_execution_seconds`
+  (default 1800, `COPILOT_MAX_EXECUTION_SECONDS`) — onto its own
+  record, and the shell reads the attempt's copies, so an
+  attempt's budget cannot move mid-run. Before the offline
+  driver runs a step, and before a live step report is accepted,
+  the attempt's spent steps and elapsed wall clock are checked:
+  a step the ceiling forbids is never handed to the driver, and
+  a report past the ceiling is recorded in the trail as data but
+  not accepted. Either way the attempt closes through the
+  ordinary failure machinery — the un-run step recorded as the
+  failed step with the exhaustion as its error, the attempt
+  carrying `budget_exhausted` and the reason, the task in
+  EXECUTION_FAILED naming it, the partial state standing — and
+  the exits are the failure exits. The attempt is the budget
+  unit on purpose: a resume or restart is a new attempt with a
+  fresh budget, because the steps already standing are history
+  the earlier attempts record, not spend the new one re-pays —
+  a resumed execution verifies over the whole plan while
+  spending only its own steps. The per-operator read
+  (`GET /api/operators/budget`, the console's budget lines)
+  folds from the attempt records — attempts run, tasks executed,
+  steps consumed, exhaustions — never from counters. And the
+  number the console serves the in-page agent as `maxSteps` is
+  this same `max_execution_steps`, read from Policy at
+  `/api/agent-config`: one ceiling, one home, under the
+  library's own field name. Two honest edges: the wall clock is
+  enforced when a step lands or is reported — a bridge that
+  goes silent past its ceiling fails on its next report, not by
+  a timer (an in-flight attempt is claimed until then, as any
+  in-flight attempt is); and the bridge may already have done a
+  refused report's work in the page, so that write stands as
+  named partial state — nothing is verified, and nothing is
+  silently overrun or silently rolled back.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -517,7 +559,11 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   carries — written after the document was built, so the
   document itself never contains it) and `export_refused`
   (the identity code: an exporter who is unknown to the
-  directory, or deactivated).
+  directory, or deactivated). Budgets add: `budget_exhausted`
+  (the attempt, the step that was not run, the reason with its
+  counts, and the ceilings in force), riding ahead of the
+  ordinary `step_failed` / `execution_failed` pair, whose
+  entries now also carry the exhaustion and its reason.
 
 ## The PageAgent API, as verified
 
@@ -590,6 +636,12 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   abandon), each of which re-checks the world before writing:
   resume and restart refuse a basis that moved underneath the
   completed work rather than writing over it.
+- **A budget is a stop, not a warning.** The ceilings are read
+  before a step runs or a report is accepted, never after: the
+  step that would cross one does not run, and the execution
+  fails in the open, naming the budget — it never completes
+  "mostly within budget", and a runaway bridge cannot spend
+  steps the shell has not counted.
 - **Verification happens once.** It is an act with a record, run
   at the end of execution; asking for it again is a recorded
   refusal, not a recomputation — a verdict that could be re-run

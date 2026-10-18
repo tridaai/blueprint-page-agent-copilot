@@ -194,6 +194,16 @@ evidence.
   a created record is never created twice. **Abandon** closes
   the task as ABANDONED with a mandatory reason; the partial
   state stays on the records, named, never cleaned up quietly.
+- **Budgets** — each attempt runs under governed ceilings it
+  snapshots onto its own record at claim time: a step ceiling
+  and a wall-clock ceiling. The shell reads the budget before a
+  step runs or a bridge report is accepted; a step the ceiling
+  forbids never runs, and the attempt closes through the same
+  failure machinery — the task in EXECUTION_FAILED naming the
+  budget, the partial state standing, a resume spending a fresh
+  attempt budget. Per-operator spend (attempts, tasks, steps,
+  exhaustions) folds from the attempt records at
+  `GET /api/operators/budget` — never from counters.
 - **Audit trail** — every step logged: plan version, confirmer,
   per-step before/after values, the driver that ran it, and the
   verification result. Readable via API and in the console.
@@ -269,7 +279,14 @@ Store profile: SQLite is the local default (`SQLITE_PATH`, a single
 file at `./data/copilot.db`). Set `DATABASE_URL` and the same code
 runs on PostgreSQL + pgvector — that one variable is the whole
 switch. Policy: `COPILOT_CREDIT_CAP` sets the credit cap
-(default `500.00`).
+(default `500.00`). Budgets: `COPILOT_MAX_PLAN_STEPS` (default 25)
+caps the plan a task may derive, `COPILOT_MAX_EXECUTION_STEPS`
+(default 40) the steps one execution attempt may run, and
+`COPILOT_MAX_EXECUTION_SECONDS` (default 1800) an attempt's wall
+clock — each enforced in the shell, the attempt stopped and the
+exhaustion named rather than overrun. The `maxSteps` the console
+serves the in-page agent is the execution-step ceiling itself,
+read from the same Policy — one number, one home.
 
 ## The governed task grammar
 
@@ -290,8 +307,10 @@ so a task it cannot derive exactly is refused as
 Plan-time refusals, each with its reason recorded on the task:
 `credit_above_cap`, `payment_field`, `delete_refused`,
 `field_not_plannable`, `value_not_governed`, `record_not_found`,
-`no_plan_derivable` — and the role refusals: `unknown_operator`,
-`role_cannot_plan`, `field_not_permitted`, `page_not_permitted`.
+`no_plan_derivable`, `plan_too_large` (a derived plan over the
+governed step ceiling, both counts named) — and the role
+refusals: `unknown_operator`, `role_cannot_plan`,
+`field_not_permitted`, `page_not_permitted`.
 Amendments face the same checks, plus `step_not_found` and
 `invalid_amendment` for a change that names no step or carries no
 value.
@@ -458,9 +477,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 233 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 247 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 61/61 cases: happy paths diffed exactly (including
+make evals   # 65/65 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -533,6 +552,15 @@ make evals   # 61/61 cases: happy paths diffed exactly (including
              # typed — 8/8 attacks held, with the section's
              # counters (injected instructions obeyed, note
              # text in step instructions, gate skips) at 0
+             # — and budgets: an over-long plan refused at
+             # plan time with both counts named, a bridge
+             # reporting past its step ceiling stopped (the
+             # exhaustion on the attempt, the task failed
+             # naming it, the landed write standing as
+             # partial state), a resume after exhaustion
+             # verifying on a fresh attempt budget, and
+             # agent-config serving the Policy ceiling as
+             # maxSteps
 ```
 
 ## Honest status
