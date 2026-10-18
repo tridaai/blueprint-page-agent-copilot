@@ -11,6 +11,7 @@ Exit 0 = PASS. Every case runs on a fresh in-memory store.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -28,8 +29,10 @@ from page_agent_copilot.config import (  # noqa: E402
 from page_agent_copilot.models import (  # noqa: E402
     AmendChangeIn,
     NavigationReportIn,
+    StepAction,
     StepReportIn,
     TaskStatus,
+    money,
 )
 from page_agent_copilot.policy import PlanRefusal  # noqa: E402
 from page_agent_copilot.records import (  # noqa: E402
@@ -2038,6 +2041,235 @@ def _():
     svc.confirm_readback(task.task_id, "s.hale", issued["token"])
     expect(svc.execute(task.task_id, "offline").status
            == TaskStatus.VERIFIED, "the voiced flow did not verify")
+
+
+# ------------------------------------------------------------- ambiguity
+# Round 14: a task that matches a governed shape in more than one
+# way parks in AWAITING_CLARIFICATION with options computed from
+# the records — never an invented value. The pack grades the
+# three classes (a record described by its status matching
+# several records; a missing credit amount where the records
+# offer a candidate set; a status value prefixing two governed
+# values), the two negative controls (no governed option set —
+# the refusal stands; a non-answer — refused, options restated),
+# the patience cap, and the round's invariant: every value in
+# every resulting plan traces to the task text, a named record
+# field, or the recorded clarification answer.
+
+AMBIG_DESCRIPTOR = ("raise a credit memo for the open invoice, "
+                    "reason damaged goods, $120")
+AMBIG_AMOUNTLESS = ("raise a credit memo for invoice 4471, "
+                    "reason damaged goods")
+
+
+@case("ambiguity: a multi-match invoice is clarified, then "
+      "verifies with exact diffs")
+def _():
+    svc = fresh()
+    task = svc.intake(AMBIG_DESCRIPTOR, "op")
+    expect(task.status == TaskStatus.AWAITING_CLARIFICATION,
+           f"status {task.status}")
+    pending = task.pending_clarification
+    expect([o.value for o in pending.options]
+           == ["4471", "4472", "4475", "4476"],
+           f"options {[o.value for o in pending.options]}")
+    task = svc.answer_clarification(task.task_id, "op", "4471")
+    expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    memos = svc.store.list_records("credit_memos")
+    expect(len(memos) == 1, f"{len(memos)} memos")
+    memo = memos[0]
+    expect(memo["invoice_id"] == "4471" and memo["amount"] == "120.00"
+           and memo["reason"] == "damaged goods"
+           and memo["status"] == "issued", f"memo {memo}")
+
+
+@case("ambiguity: a missing amount is clarified from the "
+      "records' candidates")
+def _():
+    svc = fresh()
+    setup = svc.intake(CREDIT, "op")
+    svc.confirm(setup.task_id, "s.hale")
+    svc.execute(setup.task_id, "offline")  # CM-5001: $120 on 4471
+    task = svc.intake(AMBIG_AMOUNTLESS, "op")
+    expect(task.status == TaskStatus.AWAITING_CLARIFICATION,
+           f"status {task.status}")
+    pending = task.pending_clarification
+    expect(pending.key == "credit_amount", f"key {pending.key}")
+    expect([o.value for o in pending.options] == ["1840.00", "120.00"],
+           f"options {[o.value for o in pending.options]}")
+    task = svc.answer_clarification(task.task_id, "op", "120.00")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    memos = svc.store.list_records("credit_memos")
+    expect(len(memos) == 2, f"{len(memos)} memos")
+    expect(memos[1]["invoice_id"] == "4471"
+           and memos[1]["amount"] == "120.00"
+           and memos[1]["reason"] == "damaged goods",
+           f"memo {memos[1]}")
+
+
+@case("ambiguity: a prefix status is clarified between "
+      "governed values")
+def _():
+    svc = fresh()
+    before = svc.store.get_record("orders", "1036")
+    task = svc.intake("mark order 1036 as p", "op")
+    expect(task.status == TaskStatus.AWAITING_CLARIFICATION,
+           f"status {task.status}")
+    pending = task.pending_clarification
+    expect([o.value for o in pending.options] == ["packed", "placed"],
+           f"options {[o.value for o in pending.options]}")
+    task = svc.answer_clarification(task.task_id, "op", "packed")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    after = svc.store.get_record("orders", "1036")
+    changed = {k for k in after if after[k] != before[k]}
+    expect(changed == {"status"}, f"changed fields {changed}")
+    expect(after["status"] == "packed", "status not packed")
+
+
+@case("ambiguity: a uniquely matching descriptor derives "
+      "without asking")
+def _():
+    svc = fresh()
+    task = svc.intake(
+        "raise a credit memo for the overdue invoice, reason "
+        "damaged goods, $120", "op")
+    expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+    expect(task.clarifications == [], "a question was asked")
+    expect(svc.get_plan(task.task_id).steps[0].fields["invoice_id"]
+           == "4474", "the unique overdue invoice was not picked")
+
+
+@case("ambiguity: no candidate set exists — the refusal stands "
+      "(negative control)")
+def _():
+    svc = fresh()
+    # No memo stands against 4471, so the records offer exactly
+    # one candidate amount — not a choice. Clarification is not
+    # a backdoor around the refusal.
+    task = svc.intake(AMBIG_AMOUNTLESS, "op")
+    expect(task.status == TaskStatus.REFUSED, f"status {task.status}")
+    expect(task.refusal_reason.startswith("no_plan_derivable"),
+           f"reason {task.refusal_reason}")
+    expect(task.clarifications == [], "a question was offered")
+
+
+@case("ambiguity: a non-answer is refused and the options "
+      "restated (negative control)")
+def _():
+    svc = fresh()
+    task = svc.intake(AMBIG_DESCRIPTOR, "op")
+    try:
+        svc.answer_clarification(task.task_id, "op", "the big one")
+        expect(False, "a non-answer was accepted")
+    except GateError as exc:
+        expect("not one of the options" in str(exc),
+               f"error {exc}")
+        expect("4471" in str(exc) and "4476" in str(exc),
+               "the options were not restated")
+    task = svc.get_task(task.task_id)
+    expect(task.status == TaskStatus.AWAITING_CLARIFICATION,
+           f"status {task.status}")
+    expect(task.pending_clarification.answer is None,
+           "the non-answer was recorded as an answer")
+    task = svc.answer_clarification(task.task_id, "op", "4472")
+    expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+
+
+@case("ambiguity: a third distinct question exhausts the "
+      "governed patience")
+def _():
+    svc = fresh()
+    setup = svc.intake(CREDIT, "op")
+    svc.confirm(setup.task_id, "s.hale")
+    svc.execute(setup.task_id, "offline")
+    task = svc.intake(
+        "raise a credit memo for the open invoice, reason "
+        "damaged goods and mark invoice 4472 as o", "op")
+    expect(task.pending_clarification.key == "credit_invoice",
+           "the descriptor did not ask first")
+    task = svc.answer_clarification(task.task_id, "op", "4471")
+    expect(task.pending_clarification.key == "credit_amount",
+           "the amount did not ask second")
+    task = svc.answer_clarification(task.task_id, "op", "120.00")
+    expect(task.status == TaskStatus.REFUSED, f"status {task.status}")
+    expect(task.refusal_reason.startswith("clarification_exhausted"),
+           f"reason {task.refusal_reason}")
+    expect(len(task.clarifications) == 2
+           and all(c.answer for c in task.clarifications),
+           "the refusal does not carry the history")
+
+
+def _plan_value_traces(svc, task, plan) -> list[str]:
+    """The round's invariant, checked value by value: every
+    value in the plan traces to (a) the task text, (b) a named
+    record field as the records stood when the plan derived, or
+    (c) the recorded clarification answer. Returns the values
+    that trace to none of the three. The CREATE step's `status`
+    is exempt: it is the grammar's fixed literal ('issued'),
+    stated by no one and chosen by no one — every credit plan
+    since round 1 carries it."""
+    answers = {c.answer for c in task.clarifications if c.answer}
+    record_values = set()
+    for kind in ("customers", "invoices", "orders", "credit_memos"):
+        for record in svc.store.list_records(kind):
+            record_values.update(str(v) for v in record.values())
+    figures = set()
+    for m in re.finditer(r"\$\s*([\d,]+(?:\.\d{1,2})?)", task.text):
+        figures.add(str(money(m.group(1).replace(",", ""))))
+    untraced = []
+    for step in plan.steps:
+        if step.action == StepAction.SET:
+            if not (step.value in task.text or step.value in answers
+                    or step.value in record_values):
+                untraced.append(step.value)
+        else:
+            for field, value in step.fields.items():
+                if field == "status":
+                    continue
+                if (value in task.text or value in answers
+                        or value in record_values
+                        or value in figures):
+                    continue
+                untraced.append(f"{field}={value}")
+    return untraced
+
+
+@case("ambiguity: every planned value traces to the text, a "
+      "record, or the recorded answer")
+def _():
+    # The descriptor flow: the invoice id comes from the answer,
+    # the amount from the text, the reason from the text.
+    svc = fresh()
+    task = svc.intake(AMBIG_DESCRIPTOR, "op")
+    task = svc.answer_clarification(task.task_id, "op", "4475")
+    untraced = _plan_value_traces(
+        svc, task, svc.get_plan(task.task_id))
+    expect(untraced == [], f"untraced values {untraced}")
+    # The amount flow: the amount comes from the answer, which
+    # came from a record (the earlier memo) — both sources named.
+    svc = fresh()
+    setup = svc.intake(CREDIT, "op")
+    svc.confirm(setup.task_id, "s.hale")
+    svc.execute(setup.task_id, "offline")
+    task = svc.intake(AMBIG_AMOUNTLESS, "op")
+    task = svc.answer_clarification(task.task_id, "op", "120.00")
+    untraced = _plan_value_traces(
+        svc, task, svc.get_plan(task.task_id))
+    expect(untraced == [], f"untraced values {untraced}")
+    # The prefix flow: the status comes from the answer alone.
+    svc = fresh()
+    task = svc.intake("mark order 1036 as p", "op")
+    task = svc.answer_clarification(task.task_id, "op", "packed")
+    untraced = _plan_value_traces(
+        svc, task, svc.get_plan(task.task_id))
+    expect(untraced == [], f"untraced values {untraced}")
 
 
 def main() -> int:
