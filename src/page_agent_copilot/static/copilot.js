@@ -8,9 +8,12 @@
  *
  * The bridge's job is deliberately narrow: put the console on the
  * step's screen, hand the agent the step's compiled instruction,
- * and report the outcome to the shell. It makes no decisions — the
- * plan was confirmed by a human, and the shell verifies the records
- * afterwards; this report is never treated as evidence of success.
+ * and report the outcome to the shell. When a plan crosses pages,
+ * it also reports the navigation between them — the shell will
+ * not accept work reported on a new page without one. It makes no
+ * decisions — the plan was confirmed by a human, and the shell
+ * verifies the records afterwards; this report is never treated
+ * as evidence of success.
  */
 (function () {
   const $ = (id) => document.getElementById(id);
@@ -76,8 +79,21 @@
     // Arm the task in the shell; from here the bridge reports steps.
     await api(`/api/tasks/${task.task_id}/execute`,
       json("POST", { driver: "page-agent-live" }));
+    let standingPage = null;
     for (const step of plan.steps) {
       await navigateForStep(step);
+      // When the plan crosses pages, the move is part of the
+      // protocol: the shell is told the bridge left the previous
+      // step's page and arrived on this step's page before any
+      // work is reported there — a step report that crosses pages
+      // without this is refused as a protocol violation.
+      if (standingPage !== null && step.page !== standingPage) {
+        await api(`/api/tasks/${task.task_id}/navigation`,
+          json("POST", { driver: "page-agent-live",
+                         from_page: standingPage,
+                         to_page: step.page }));
+      }
+      standingPage = step.page;
       if (step.record_kind === "credit_memos") {
         $("cm-task-id").value = task.task_id;
       }

@@ -152,6 +152,8 @@ from .models import (
     AuditEntry,
     CorrectionEntry,
     ExecutionAttempt,
+    NavigationReportIn,
+    PageNavigation,
     Plan,
     PlanChange,
     PlanDiff,
@@ -1488,6 +1490,52 @@ class CopilotService:
             self._created_ids(task.task_id, plan,
                               attempt.base_attempt))
 
+    def _record_navigation(self, task: Task, plan: Plan,
+                           attempt: ExecutionAttempt, seq: int,
+                           from_page: str, to_page: str,
+                           driver: str) -> None:
+        """Record one page transition on the running attempt and
+        in the audit trail: before step `seq` ran, the driver
+        moved from `from_page` to `to_page` (round 12). A
+        navigation is not a step — it consumes no step budget and
+        changes no record; it is the execution's evidence of
+        where it stood between the steps."""
+        attempt.navigations.append(PageNavigation(
+            seq=seq, from_page=from_page, to_page=to_page,
+            driver=driver))
+        self._store_attempt(attempt)
+        self._audit(task.task_id, driver, "page_navigated", {
+            "seq": seq, "from_page": from_page, "to_page": to_page,
+            "attempt": attempt.number, "plan_version": plan.version})
+
+    def _current_page(self, task_id: str, plan: Plan,
+                      base_attempt: int) -> Optional[str]:
+        """The console page an execution stands on: the page of
+        its latest act — an accepted step outcome or a recorded
+        navigation — across every attempt the execution counts
+        (from `base_attempt` on, so a resume stands where its
+        earlier attempts left it and a restart stands only on its
+        own). None before the first step lands: the execution has
+        not stood anywhere yet, and the first step needs no
+        navigation."""
+        page_of = {s.seq: s.page for s in plan.steps}
+        current: Optional[str] = None
+        for attempt in self.get_attempts(task_id):
+            if attempt.number < base_attempt:
+                continue
+            navs = list(attempt.navigations)
+            for outcome in attempt.steps:
+                # A navigation precedes the step it enables: any
+                # navigation recorded for this step or an earlier
+                # one landed before this outcome did.
+                while navs and navs[0].seq <= outcome.seq:
+                    current = navs.pop(0).to_page
+                if outcome.seq in page_of:
+                    current = page_of[outcome.seq]
+            for nav in navs:
+                current = nav.to_page
+        return current
+
     def _run_offline_steps(self, task: Task, plan: Plan,
                            attempt: ExecutionAttempt,
                            steps: list[PlanStep],
@@ -1501,6 +1549,16 @@ class CopilotService:
         exception that strands the task mid-plan with nothing
         written down."""
         runner = OfflineDriver(tamper=tamper, fail=fail)
+        # Where the execution stands as this attempt starts: a
+        # resume continues mid-plan, and the step the plan ran
+        # just before this attempt's first step is where it stood
+        # — a first step on a different page crosses one.
+        prev_page: Optional[str] = None
+        if steps:
+            first = next(i for i, s in enumerate(plan.steps)
+                         if s.seq == steps[0].seq)
+            if first > 0:
+                prev_page = plan.steps[first - 1].page
         for step in steps:
             # The budget is read before the step runs: a step the
             # ceiling forbids is never handed to the driver at
@@ -1509,6 +1567,15 @@ class CopilotService:
             if block is not None:
                 return self._exhaust_execution(
                     task, plan, attempt, step, block, DRIVER_OFFLINE)
+            # A page change between consecutive steps is an
+            # explicit navigation on the attempt — for this
+            # driver a recorded no-op transition naming the page
+            # left and the page arrived on, before the step runs.
+            if prev_page is not None and step.page != prev_page:
+                self._record_navigation(
+                    task, plan, attempt, step.seq, prev_page,
+                    step.page, DRIVER_OFFLINE)
+            prev_page = step.page
             try:
                 outcome = runner.run_step(self.store, task, plan, step)
             except Exception as exc:  # the driver's error, verbatim
@@ -1587,6 +1654,7 @@ class CopilotService:
                             "execution_refused", {
                                 "code": first["problem"], "who": who,
                                 "role": role.name,
+                                "page": first["page"],
                                 "field": first["field"],
                                 "record_kind": first["record_kind"],
                                 "reason": describe_problem(role, first),
@@ -1666,6 +1734,34 @@ class CopilotService:
                 f"by an earlier attempt; a resumed execution runs "
                 f"only the steps that never completed")
         step = next(s for s in plan.steps if s.seq == seq)
+        # Navigation (round 12): the report claims work on the
+        # step's page. If this execution last stood on a different
+        # page, a navigation to this one must already be recorded
+        # — a recorded navigation is what _current_page reads, so
+        # standing elsewhere here means none was reported. The
+        # report is refused as a bridge protocol violation and the
+        # refusal recorded; the attempt stays running, so the
+        # bridge can navigate and report again. A step report may
+        # never silently cross pages.
+        current = self._current_page(task_id, plan,
+                                     attempt.base_attempt)
+        if current is not None and current != step.page:
+            self._audit(task_id, DRIVER_LIVE, "step_report_refused", {
+                "code": "navigation_missing", "seq": seq,
+                "step_page": step.page, "current_page": current,
+                "attempt": attempt.number,
+                "plan_version": plan.version,
+                "reason": f"step {seq} works on the {step.page} "
+                          f"page, but the execution stands on the "
+                          f"{current} page and no navigation was "
+                          f"reported"})
+            raise GateError(
+                f"step report for task {task_id} refused: step "
+                f"{seq} works on the {step.page} page, but this "
+                f"execution stands on the {current} page and no "
+                f"navigation {current} -> {step.page} was reported "
+                f"(navigation_missing); the bridge must report the "
+                f"navigation before reporting work on a new page")
         detail = report.detail
         if not report.ok and not detail:
             detail = ("the in-page agent reported this step failed "
@@ -1696,6 +1792,80 @@ class CopilotService:
                 {s.seq for s in plan.steps}:
             return task
         return self._complete_attempt(task, plan, attempt)
+
+    def report_navigation(self, task_id: str,
+                          report: NavigationReportIn) -> Task:
+        """Record the live bridge's navigation between pages
+        (round 12): it stood on `from_page` and now stands on
+        `to_page`, ahead of the step that works there.
+
+        The report is protocol, and the shell checks it like any
+        other protocol claim: it must start where the execution
+        actually stands (the page of its latest accepted act) and
+        arrive on the page of the next step the execution still
+        owes — step reports are then accepted on that page. A
+        navigation that does not fit is refused and recorded
+        (`navigation_refused`, with its code); the attempt stays
+        running. The first step of an execution needs no
+        navigation: the bridge arms on its page."""
+        task = self._require_task(task_id)
+        if task.status != TaskStatus.CONFIRMED or task.driver != DRIVER_LIVE:
+            raise GateError(
+                f"task {task_id} is not awaiting live navigation "
+                f"reports (status {task.status.value}, driver "
+                f"{task.driver})")
+        plan = self._bound_plan(task)
+        attempt = self._running_attempt(task_id)
+        if attempt is None:
+            raise GateError(
+                f"task {task_id} has no execution attempt in flight "
+                f"to navigate against")
+        current = self._current_page(task_id, plan,
+                                     attempt.base_attempt)
+
+        def refuse(code: str, reason: str) -> None:
+            self._audit(task_id, DRIVER_LIVE, "navigation_refused", {
+                "code": code, "from_page": report.from_page,
+                "to_page": report.to_page, "current_page": current,
+                "attempt": attempt.number,
+                "plan_version": plan.version, "reason": reason})
+            raise GateError(
+                f"navigation report for task {task_id} refused: "
+                f"{reason}")
+
+        if current is None:
+            refuse("no_current_page",
+                   "no step of this execution has landed yet; the "
+                   "first step needs no navigation — the bridge "
+                   "arms on the first step's page")
+        if report.from_page != current:
+            refuse("from_page_mismatch",
+                   f"the bridge reports leaving the "
+                   f"{report.from_page} page, but this execution "
+                   f"stands on the {current} page; a navigation "
+                   f"must start where the execution actually stands")
+        done = self._completed_seqs(task_id, attempt.base_attempt)
+        remaining = [s for s in plan.steps if s.seq not in done]
+        if not remaining:
+            refuse("no_step_owing",
+                   "every step of this execution has landed; "
+                   "there is no step to navigate to")
+        nxt = remaining[0]
+        if nxt.page == current:
+            refuse("no_navigation_owed",
+                   f"step {nxt.seq}, the next step this execution "
+                   f"owes, works on the {current} page the "
+                   f"execution already stands on; no navigation "
+                   f"is owed")
+        if report.to_page != nxt.page:
+            refuse("unexpected_destination",
+                   f"the next step this execution owes is step "
+                   f"{nxt.seq} on the {nxt.page} page, but the "
+                   f"bridge reports arriving on the "
+                   f"{report.to_page} page")
+        self._record_navigation(task, plan, attempt, nxt.seq,
+                                current, report.to_page, DRIVER_LIVE)
+        return task
 
     # -- failure recovery --------------------------------------------------
     def _refuse_inactive_executor(self, task: Task, plan: Plan,
@@ -1766,6 +1936,7 @@ class CopilotService:
                             "execution_refused", {
                                 "code": first["problem"], "who": who,
                                 "role": role.name,
+                                "page": first["page"],
                                 "field": first["field"],
                                 "record_kind": first["record_kind"],
                                 "reason": describe_problem(role, first),

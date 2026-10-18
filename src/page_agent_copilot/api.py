@@ -665,6 +665,16 @@ def create_app(settings: Optional[Settings] = None,
         task = service.report_step(task_id, seq, body)
         return task.model_dump(mode="json")
 
+    @app.post("/api/tasks/{task_id}/navigation")
+    def report_navigation(task_id: str, body: NavigationReportIn):
+        # The bridge's page-to-page move, reported before the step
+        # that works on the new page (round 12). The shell checks
+        # it against where the execution stands and which step
+        # comes next; a report that skips it is refused at the
+        # step report instead.
+        task = service.report_navigation(task_id, body)
+        return task.model_dump(mode="json")
+
     @app.get("/api/tasks/{task_id}/audit")
     def audit(task_id: str):
         if service.get_task(task_id) is None:
