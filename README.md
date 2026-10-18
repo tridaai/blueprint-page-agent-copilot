@@ -103,6 +103,26 @@ evidence.
   report (acts by kind, tasks planned, confirmed, executed, and
   the refusals each name received) is folded from the trail,
   never counted separately.
+- **Task library** — the recurring jobs are governed records,
+  not remembered phrasings: a **template** is a task-text
+  pattern with named parameter slots, a note on when to use it,
+  and a version — seeded with the console's grammar (credit
+  memo, credit memo and settle, ship order, order status,
+  invoice status, customer update). Publishing a new version is
+  a supervisor-only recorded act; old versions stay readable
+  and instantiable by name and version. Instantiating one
+  validates its slots (a record slot must name a record that
+  exists; a money slot must parse), renders the text, and
+  states it as an ordinary task — the planner derives the plan
+  from the rendered text through the same grammar, so a
+  template cannot smuggle a plan past the planner, and a slot
+  value that policy refuses fails with policy's own reason.
+  Each version pins **examples** — slot values plus the exact
+  plan shape they must derive — which run in the eval gate; a
+  version whose examples no longer derive to their pinned shape
+  is marked **BROKEN** in the library, computed on read (the
+  eval runner stores no results, so health is the examples,
+  re-derived at the moment of asking).
 - **Two drivers, one step interface** — the real `page-agent`
   package in the operator's browser (live), and a deterministic
   offline driver (tests, evals, fallback), labelled honestly in
@@ -307,6 +327,17 @@ their executor on the attempt record and on the
 `execution_completed` entry, so `GET /api/operators/report` can
 fold each name's history from the trail, and
 `GET /api/attribution` runs the completeness check over it.
+The task library reads at `GET /api/templates` (every version,
+health folded in), `GET /api/templates/{name}`, and
+`GET /api/templates/{name}/versions/{version}`; a supervisor
+publishes a new version at `POST /api/templates`, and a task is
+stated from one at `POST /api/templates/{name}/instantiate`
+with the version named or omitted — the task records the exact
+version used either way. Library acts are recorded in their own
+audit scope at `GET /api/templates-audit` (`template_published`,
+`template_refused`, `template_instantiation_refused`), and each
+instantiated task's own trail carries `template_instantiated`
+with the template, the version, and the slot values.
 
 ## Layout
 
@@ -320,6 +351,8 @@ src/page_agent_copilot/
   policy.py       the plan-time refusals (cap, payment fields, deletes)
   roles.py        roles as governed records: pages, field allowlists,
                   action classes, the strict loader, the checks
+  templates.py    the task library: templates as governed records —
+                  pattern, slots, pinned examples, the strict loader
   drivers.py      the step interface + the deterministic offline driver
   reads.py        the console read surface: the reads the API serves,
                   and the only path verification re-reads through
@@ -335,7 +368,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (40 cases)
+evals/            the scripted-task gate (46 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -343,9 +376,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 145 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 173 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 40/40 cases: happy paths diffed exactly (including
+make evals   # 46/46 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -376,7 +409,14 @@ make evals   # 40/40 cases: happy paths diffed exactly (including
              # then completed through a supervisor's pickup, the
              # attribution check at zero on a mixed run and
              # naming planted rows, and the per-operator report
-             # reconciling with the trail it folds from
+             # reconciling with the trail it folds from — and
+             # the task library: every seeded template
+             # instantiated, planned, and verified with exact
+             # diffs, an old version instantiated by name and
+             # version, a slot naming a missing record refused at
+             # instantiation, an operator refused at publish, a
+             # policy-breaking slot value refused in policy's own
+             # words, and every template's pinned examples green
 ```
 
 ## Honest status

@@ -143,6 +143,52 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   record names; and executions from before this round carry no
   executor on their entry, so those count for the task's
   operator — the executor `execute` defaulted to then.
+- **Task library** (`templates.py`, `service.py`) — the recurring
+  task shapes as governed records, following the roles' pattern
+  exactly: defaults as data in the module, validated by a strict
+  loader (`load_template`) that the seeding path and every
+  publish both pass through, stored as records (kind
+  `templates`, id `name:v<version>`), and administered in their
+  own reserved audit scope (`templates`). A `TaskTemplate` is a
+  pattern — task text with named slots — a description of when
+  to use it, and a version; the loader holds the pattern's
+  placeholders to be exactly the declared slots, a record slot
+  to a real record kind, and every pinned example to fill
+  exactly the declared slots. **Publishing** a new version is a
+  recorded act gated like the directory acts (enrolled, active,
+  `can_administer`): the service assigns the next version
+  number, identical content is refused as `no_change`, and the
+  superseded version is kept — readable and instantiable by name
+  and version, never edited or deleted. **Instantiation** is
+  deliberately not a planning path: slot values are validated
+  first (a record slot must name a record that exists — the
+  planner's own `record_not_found` refusal, recorded as
+  `template_instantiation_refused` before it raises; a money
+  slot must parse; a date slot must be a calendar date), the
+  pattern renders to plain task text, and that text goes through
+  `intake` unchanged, so role rules, the grammar, and policy
+  apply exactly as they do to a typed task — a slot value that
+  renders underivable or policy-breaking text returns the
+  REFUSED task intake itself produces, with the planner's reason
+  on it. The task records `template_name` and the exact
+  `template_version` used — the resolved version, named even
+  when the caller asked for the current one — and the act lands
+  on the task's trail as `template_instantiated`. Each version
+  carries **pinned examples** (slot values + the expected plan
+  shape: task type and per-step record/field/value or field set,
+  in `plan_shape`'s terms). A version's **health is computed on
+  read**: `template_health` re-derives every example against a
+  scratch store seeded with the OrderDesk records — the same
+  basis the eval gate grades on — and the library view folds the
+  verdict in (`current`, `health.ok`, per-example detail naming
+  the refusal or the first differing step). The eval runner
+  stores no results file, so there is no stored verdict to read
+  back; health is the examples, re-derived at the moment of
+  asking, and the same examples run as cases in the eval gate —
+  a planner or policy change that breaks a template fails the
+  gate and marks the version broken in the library by name and
+  version, which is the seed the template regression gate
+  (round 19) grows from.
 - **State machine** (`service.py`) — DRAFT → PLANNED → CONFIRMED →
   VERIFIED / DISCREPANCY, with REFUSED as the plan-time terminal
   and DISCREPANCY_ACCEPTED as the deviation terminal (reached only
@@ -365,7 +411,14 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   with the planner named) and `pickup_refused`; and
   `execution_completed` / `execution_failed` now name the executor
   alongside the driver. Deactivation refusals ride the acts' own
-  `*_refused` entries with code `operator_inactive`.
+  `*_refused` entries with code `operator_inactive`. The task
+  library adds its own: under the `templates` scope,
+  `template_published` (the name, the version, the version it
+  supersedes), `template_refused` (the act, the target, the
+  code), and `template_instantiation_refused` (the template, the
+  version, the code, the reason); and on the task itself,
+  `template_instantiated` (the template, the exact version used,
+  the version requested, and the slot values).
 
 ## The PageAgent API, as verified
 
