@@ -139,6 +139,11 @@ def _summarize(steps: list[PlanStep]) -> str:
     return "; ".join(_step_summary(s) for s in steps)
 
 
+# Public alias: the service re-summarizes a plan after an amendment
+# from exactly the steps the amendment produced.
+summarize_steps = _summarize
+
+
 def _require_record(store: Store, kind: str, record_id: str) -> dict:
     record = store.get_record(kind, record_id)
     if record is None:
