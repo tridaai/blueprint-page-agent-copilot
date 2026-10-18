@@ -40,6 +40,7 @@ class Store(Protocol):
     def latest_plan(self, task_id: str) -> Optional[dict]: ...
     def add_audit(self, entry: dict) -> None: ...
     def list_audit(self, task_id: str) -> list[dict]: ...
+    def list_all_audit(self) -> list[dict]: ...
 
 
 class InMemoryStore:
@@ -101,6 +102,9 @@ class InMemoryStore:
 
     def list_audit(self, task_id: str) -> list[dict]:
         return [dict(e) for e in self._audit if e["task_id"] == task_id]
+
+    def list_all_audit(self) -> list[dict]:
+        return [dict(e) for e in self._audit]
 
 
 class SqlStore:
@@ -263,6 +267,11 @@ class SqlStore:
             f"SELECT data FROM audit_entries WHERE task_id = {self._ph} "
             f"ORDER BY id",
             (task_id,))
+        return [json.loads(r["data"]) for r in rows]
+
+    def list_all_audit(self) -> list[dict]:
+        rows = self._all(
+            "SELECT data FROM audit_entries ORDER BY id")
         return [json.loads(r["data"]) for r in rows]
 
 

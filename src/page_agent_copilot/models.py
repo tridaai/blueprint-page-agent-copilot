@@ -163,6 +163,16 @@ class Task(BaseModel):
     task_id: str
     text: str
     operator: str
+    # Who planned the task, as enrolled at intake. `operator` is
+    # the name the task currently belongs to — a supervisor's
+    # pickup of a deactivated operator's work re-names it — and
+    # `planned_by` is how the original planner stays on the
+    # record after that. Tasks from before the directory round
+    # carry None here; readers fall back to `operator`.
+    planned_by: Optional[str] = None
+    # The operator a pickup took this task from, when a supervisor
+    # picked it up: the name whose deactivation orphaned the work.
+    picked_up_from: Optional[str] = None
     status: TaskStatus = TaskStatus.DRAFT
     plan_version: Optional[int] = None
     confirmed_by: Optional[str] = None
@@ -242,6 +252,11 @@ class ExecutionAttempt(BaseModel):
     task_id: str
     number: int
     driver: str
+    # The operator who ran this attempt — the executor the role
+    # re-check passed. The audit's execution entries carry it too,
+    # so an execution is attributable to a person, not only to a
+    # driver. Attempts from before the directory round carry "".
+    executor: str = ""
     plan_version: int
     mode: str  # "execute" | "resume" | "restart"
     outcome: str = "running"  # "running" | "completed" | "failed"
@@ -421,6 +436,36 @@ class RoleUpdateIn(BaseModel):
     can_amend: bool = False
     can_execute: bool = False
     can_administer: bool = False
+
+
+class EnrollOperatorIn(BaseModel):
+    """Enrol a name in the operator directory. A recorded
+    supervisor act: `operator` is the acting supervisor, `name`
+    the name being enrolled (stored normalised), `role` the
+    role it is assigned."""
+    operator: str
+    name: str
+    role: str
+
+
+class AssignRoleIn(BaseModel):
+    """Change the role an enrolled name holds. A recorded
+    supervisor act; the before and after ride the audit entry."""
+    operator: str
+    role: str
+
+
+class DirectoryActIn(BaseModel):
+    """Deactivate or reactivate an enrolled name. A recorded
+    supervisor act; `operator` is the acting supervisor."""
+    operator: str
+
+
+class PickupIn(BaseModel):
+    """Pick up a deactivated operator's orphaned task. A recorded
+    supervisor act: the task's operator becomes the supervisor,
+    and the original planner stays on the record."""
+    operator: str
 
 
 class CorrectiveIn(BaseModel):

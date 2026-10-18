@@ -29,6 +29,15 @@ live in the store as records — kinds `roles` and `operators` —
 seeded from the defaults here when absent, and changed only
 through `service.update_role`, which validates the new definition
 with the strict loader and writes the change to the audit trail.
+
+The directory itself is governed the same way (round 6): names
+are enrolled, assigned a role, deactivated, and reactivated only
+through recorded supervisor acts in the service, and a
+deactivated name may perform no act at all — deactivation is a
+state on the record, never a deletion, so every act the name ever
+took stays attributable to it. Names resolve normalised
+(`operator_named`) at enrolment and at act time alike: a spacing
+or casing variant of a directory name is that name.
 """
 
 from __future__ import annotations
@@ -163,16 +172,32 @@ DEFAULT_ROLES: list[dict] = [
     },
 ]
 
-# Which operator name holds which role. Seeded like the roles;
-# enrolling new operators is an identity act (a later round), so in
-# this round the directory is read-only data and an unknown name
-# holds no role at all — it may do nothing.
+# Which operator name holds which role, and whether the name is
+# active. Seeded like the roles; from the seed on, the directory
+# changes only through the recorded acts in the service (enrol,
+# assign, deactivate, reactivate). An unknown name holds no role
+# at all — it may do nothing — and a deactivated name, though it
+# stays in the directory so its history keeps resolving, may do
+# nothing either.
 DEFAULT_OPERATORS: list[dict] = [
-    {"id": "j.okafor", "role": "operator"},
-    {"id": "op", "role": "operator"},
-    {"id": "s.hale", "role": "supervisor"},
-    {"id": "v.ward", "role": "viewer"},
+    {"id": "j.okafor", "role": "operator", "active": True},
+    {"id": "op", "role": "operator", "active": True},
+    {"id": "s.hale", "role": "supervisor", "active": True},
+    {"id": "v.ward", "role": "viewer", "active": True},
 ]
+
+# The shell's own actors. Not every audit entry is a person's
+# act: the planner writes `plan_created` under "planner", policy
+# refusals land under "policy", the verifier writes its verdicts
+# under "verifier", and the drivers write their steps under their
+# driver names (drivers.DRIVER_OFFLINE / DRIVER_LIVE). These
+# names are governed here so attribution has a closed world to
+# resolve against: an audit actor is attributable when it is a
+# directory name, in any state, or one of these components.
+SYSTEM_ACTORS = frozenset({
+    "planner", "policy", "verifier",
+    "offline", "page-agent-live",
+})
 
 
 def step_fields(step) -> list[tuple[str, str]]:
