@@ -3,7 +3,9 @@ and the browser bridge endpoints.
 
 One rule holds across all of it: state changes go through the
 service / record mutations, and gate refusals surface as HTTP 409 —
-the API never widens what the shell allows.
+the API never widens what the shell allows. Policy refusals on an
+otherwise legal act (an amendment whose value breaks policy)
+surface as HTTP 422 with the refusal code, and change nothing.
 """
 
 from __future__ import annotations
@@ -20,12 +22,16 @@ from .config import Settings
 from .logging_setup import new_request_id, setup_logging
 from .models import (
     PAYMENT_FIELDS,
+    AmendIn,
     ConfirmIn,
     ConsoleSaveIn,
     ExecuteIn,
+    RejectIn,
+    ReplanIn,
     StepReportIn,
     TaskIntake,
 )
+from .policy import PlanRefusal
 from .records import apply_field_change, create_credit_memo
 from .service import CopilotService, GateError
 from .store import Store, build_store
@@ -60,6 +66,15 @@ def create_app(settings: Optional[Settings] = None,
     @app.exception_handler(GateError)
     async def gate_error(_: Request, exc: GateError):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(PlanRefusal)
+    async def plan_refusal(_: Request, exc: PlanRefusal):
+        # A value policy refuses (an over-cap amendment, an
+        # ungoverned status): the request was well-formed and the
+        # state machine allowed the attempt, but policy says no.
+        # Nothing was changed.
+        return JSONResponse(status_code=422, content={
+            "detail": exc.message, "code": exc.code})
 
     @app.exception_handler(KeyError)
     async def not_found(_: Request, exc: KeyError):
@@ -185,6 +200,53 @@ def create_app(settings: Optional[Settings] = None,
         task = service.get_task(task_id)
         if task is None:
             raise KeyError(f"task {task_id} does not exist")
+        plan = service.get_plan(task_id)
+        return {"task": task.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json") if plan else None,
+                "plan_versions": [p.version
+                                  for p in service.list_plans(task_id)]}
+
+    @app.get("/api/tasks/{task_id}/plans")
+    def plans(task_id: str):
+        if service.get_task(task_id) is None:
+            raise KeyError(f"task {task_id} does not exist")
+        return [p.model_dump(mode="json")
+                for p in service.list_plans(task_id)]
+
+    @app.get("/api/tasks/{task_id}/plans/{version}")
+    def plan_version(task_id: str, version: int):
+        plan = service.get_plan(task_id, version)
+        if plan is None:
+            raise KeyError(
+                f"task {task_id} has no plan version {version}")
+        return plan.model_dump(mode="json")
+
+    @app.get("/api/tasks/{task_id}/plan-diff")
+    def plan_diff(task_id: str, from_version: int, to_version: int):
+        if service.get_task(task_id) is None:
+            raise KeyError(f"task {task_id} does not exist")
+        diff = service.plan_diff(task_id, from_version, to_version)
+        return diff.model_dump(mode="json")
+
+    @app.post("/api/tasks/{task_id}/amend")
+    def amend(task_id: str, body: AmendIn):
+        # Amendment is a PLANNED-state act only. On a CONFIRMED
+        # task this returns 409: the route past a confirmed plan is
+        # rejection and a fresh intake, never an edit.
+        task, plan, changes = service.amend(
+            task_id, body.operator, body.changes)
+        return {"task": task.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json"),
+                "changes": [c.model_dump(mode="json") for c in changes]}
+
+    @app.post("/api/tasks/{task_id}/reject")
+    def reject(task_id: str, body: RejectIn):
+        task = service.reject(task_id, body.operator)
+        return task.model_dump(mode="json")
+
+    @app.post("/api/tasks/{task_id}/replan")
+    def replan(task_id: str, body: ReplanIn):
+        task = service.replan(task_id, body.operator)
         plan = service.get_plan(task_id)
         return {"task": task.model_dump(mode="json"),
                 "plan": plan.model_dump(mode="json") if plan else None}
