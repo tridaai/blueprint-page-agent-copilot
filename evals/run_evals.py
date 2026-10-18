@@ -16,8 +16,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from fastapi.testclient import TestClient  # noqa: E402
+
+from page_agent_copilot.api import create_app  # noqa: E402
 from page_agent_copilot.batches import BatchMemberIn  # noqa: E402
-from page_agent_copilot.config import Settings  # noqa: E402
+from page_agent_copilot.config import (  # noqa: E402
+    PageAgentConfig,
+    Policy,
+    Settings,
+)
 from page_agent_copilot.models import (  # noqa: E402
     AmendChangeIn,
     StepReportIn,
@@ -1603,6 +1610,123 @@ def _():
     memos = svc.store.list_records("credit_memos")
     expect(len(memos) == 1 and memos[0]["amount"] == "120.00",
            f"memos {memos}")
+
+
+# -- Round 11: budgets ------------------------------------------------------
+# Per-task ceilings, enforced in the shell. A plan longer than the
+# plan ceiling refuses at plan time with the counts named. An
+# attempt — the budget unit — that would run past its step ceiling
+# or its wall clock is stopped by the shell: the step is never run
+# (offline) or never accepted (the bridge), the partial state
+# stands, and the task lands in EXECUTION_FAILED naming the
+# budget. A resume is a new attempt with a fresh budget. The
+# value served to the page as PageAgent's maxSteps is the Policy
+# ceiling itself — one number, one home.
+
+def fresh_with(policy) -> CopilotService:
+    svc = CopilotService(
+        Settings(store_kind="memory", store_target="",
+                 policy=policy, page_agent=PageAgentConfig()),
+        InMemoryStore())
+    svc.seed()
+    return svc
+
+
+SHIP3 = ("mark order 1032 as shipped, ship date 2026-10-20, "
+         "carrier DHL")
+COMPOUND3 = ("mark order 1032 as shipped and mark order 1036 as "
+             "packed and mark invoice 4471 as paid")
+
+
+@case("budget: a plan over the step ceiling refuses at plan time")
+def _():
+    svc = fresh_with(Policy(max_plan_steps=2))
+    task = svc.intake(COMPOUND3, "op")
+    expect(task.status == TaskStatus.REFUSED, f"status {task.status}")
+    expect("plan_too_large" in (task.refusal_reason or ""),
+           f"reason {task.refusal_reason}")
+    expect("3 steps" in task.refusal_reason
+           and "of 2 plan steps" in task.refusal_reason,
+           "the refusal does not name both counts")
+    expect(task.plan_version is None, "a refused plan was stored")
+    # At the ceiling, the same statement of work plans.
+    task = fresh_with(Policy(max_plan_steps=3)).intake(COMPOUND3,
+                                                       "op")
+    expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+
+
+@case("budget: a bridge reporting past the ceiling is stopped")
+def _():
+    svc = fresh_with(Policy(max_execution_steps=2))
+    task = svc.intake(SHIP3, "op")
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "page-agent-live")
+    apply_field_change(svc.store, "orders", "1032", "status",
+                       "shipped")
+    task = svc.report_step(task.task_id, 1, StepReportIn(ok=True))
+    apply_field_change(svc.store, "orders", "1032", "ship_date",
+                       "2026-10-20")
+    task = svc.report_step(task.task_id, 2, StepReportIn(ok=True))
+    expect(task.status == TaskStatus.CONFIRMED,
+           f"status {task.status}")
+    # The bridge does the third step's work and reports it — past
+    # the ceiling, the report is not accepted and the execution
+    # fails for budget. The write the bridge landed stands as
+    # named partial state; nothing is verified.
+    apply_field_change(svc.store, "orders", "1032", "carrier", "DHL")
+    task = svc.report_step(task.task_id, 3, StepReportIn(ok=True))
+    expect(task.status == TaskStatus.EXECUTION_FAILED,
+           f"status {task.status}")
+    expect("budget exhausted" in (task.failure_error or ""),
+           f"failure {task.failure_error}")
+    expect(task.failed_step == 3, f"failed step {task.failed_step}")
+    attempt = svc.get_attempts(task.task_id)[0]
+    expect(attempt.budget_exhausted is True, "no exhaustion record")
+    expect(attempt.step_ceiling == 2, "the ceiling was not recorded")
+    expect(svc.store.get_record("orders", "1032")["carrier"] == "DHL",
+           "the bridge's landed write was silently rolled back")
+    expect(svc.get_verification(task.task_id) is None,
+           "an exhausted execution produced a verdict")
+
+
+@case("budget: resume after exhaustion completes on a fresh budget")
+def _():
+    svc = fresh_with(Policy(max_execution_steps=2))
+    task = svc.intake(SHIP3, "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.EXECUTION_FAILED,
+           f"status {task.status}")
+    expect("budget exhausted" in (task.failure_error or ""),
+           f"failure {task.failure_error}")
+    task = svc.resume_execution(task.task_id)
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    attempts = svc.get_attempts(task.task_id)
+    expect(len(attempts) == 2, f"{len(attempts)} attempts")
+    # Four step outcomes across the task against a ceiling of
+    # two: the resume's step ran under its own fresh budget —
+    # the budget is the attempt's, not the task's.
+    expect(sum(len(a.steps) for a in attempts) == 4,
+           "the resume did not spend a fresh attempt budget")
+    order = svc.store.get_record("orders", "1032")
+    expect((order["status"], order["ship_date"], order["carrier"])
+           == ("shipped", "2026-10-20", "DHL"), f"order {order}")
+
+
+@case("budget: agent-config serves the Policy ceiling as maxSteps")
+def _():
+    settings = Settings(store_kind="memory", store_target="",
+                        policy=Policy(max_execution_steps=7),
+                        page_agent=PageAgentConfig())
+    client = TestClient(create_app(settings, InMemoryStore(),
+                                   seed=True))
+    cfg = client.get("/api/agent-config").json()
+    expect(cfg["maxSteps"] == 7, f"maxSteps {cfg['maxSteps']}")
+    rows = client.get("/api/operators/budget").json()
+    expect(all(set(r) == {"operator", "role", "active",
+                          "attempts_run", "tasks_executed",
+                          "steps_consumed", "budget_exhaustions"}
+               for r in rows), f"budget rows {rows}")
 
 
 def main() -> int:
