@@ -1,0 +1,136 @@
+# Architecture — Page Agent Admin Copilot
+
+## The pattern
+
+PageAgent gives a web page a natural-language operator. Left alone,
+that operator works from a prompt, reports its own success, and is
+steered by whatever text the page contains. The blueprint wraps it
+in the shell a production deployment needs:
+
+```
+operator ──task──▶ intake ──▶ planner ──▶ plan (stored, versioned)
+                                             │
+                                  policy refusals happen here,
+                                  before any human is asked
+                                             │
+                                     CONFIRM GATE (named human)
+                                             │
+                       ┌─────────────────────┴───────────────────┐
+                       ▼                                         ▼
+              PageAgent in the page                     offline driver
+              (real package, browser)              (deterministic, labelled)
+                       └─────────────────────┬───────────────────┘
+                                             ▼
+                              verify: store state vs plan,
+                              field by field, in code
+                                             │
+                                  VERIFIED ── or ── DISCREPANCY
+```
+
+## Components
+
+- **OrderDesk console** (`static/orderdesk.html`, `console.js`) —
+  orders, customers, invoices, credit memos as real labelled forms.
+  Every form save lands on the shell's JSON endpoints, which mutate
+  state through `records.py` — the same path the offline driver
+  uses, and the path a browser form submission (human or agent)
+  lands on. There is one mutation path, so there is one thing to
+  verify.
+- **Planner** (`planner.py`) — deterministic derivation from task
+  text + records. A plan is a list of field-level steps; each step
+  carries the exact instruction the in-page agent will execute,
+  compiled from the same fields the verifier diffs. Values come from
+  the task or the record, never from page notes and never invented:
+  an underivable task is refused (`no_plan_derivable`).
+- **Policy** (`policy.py`) — plan-time refusals: deletes
+  (`delete_refused`), credits above the governed cap
+  (`credit_above_cap`, default $500, `COPILOT_CREDIT_CAP`), payment
+  fields on any record (`payment_field`), non-allowlisted fields
+  (`field_not_plannable`), ungoverned status values
+  (`value_not_governed`), missing records (`record_not_found`).
+- **State machine** (`service.py`) — DRAFT → PLANNED → CONFIRMED →
+  VERIFIED / DISCREPANCY, with REFUSED as the plan-time terminal.
+  Execution requires CONFIRMED; the check is in the service against
+  the store, and the API maps the refusal to HTTP 409. A second
+  execution of a started task is likewise refused.
+- **Drivers** (`drivers.py`) — one step interface, two drivers:
+  - `offline`: applies each step through `records.py`, recording
+    before/after field values. Deterministic; the driver of tests
+    and evals.
+  - `page-agent-live`: the browser bridge arms the task
+    (`execution_started`), navigates the console to each step's
+    screen, calls `agent.execute(step.instruction)`, and posts a
+    step report. When the last step lands, the shell verifies. The
+    report's `ok` is recorded but never consulted by the verifier.
+- **Verifier** (`verify.py`) — for SET steps, the record's current
+  field vs the planned value; for CREATE steps, every planned field
+  vs the created record (found via the id the executing path minted,
+  or `created_for_task` on the live path). Any mismatch → DISCREPANCY
+  with named FieldDiffs.
+- **Store port** (`store.py`) — records as JSON documents keyed by
+  (kind, id); tasks, versioned plans, audit entries. In-memory,
+  SQLite (local default, `./data/copilot.db`), PostgreSQL
+  (production profile via `DATABASE_URL`, pgvector extension
+  enabled by migration 0001). Numbered migrations in both dialects,
+  applied at startup, recorded in `schema_migrations`.
+- **Audit** — one entry per act: `task_created`, `plan_created`
+  (plan version + summary), `plan_refused` (policy code + reason),
+  `plan_confirmed` (who), `step_executed` / `step_reported`
+  (before/after, driver), `execution_completed`,
+  `verification_passed` / `verification_failed` (checked count,
+  diffs).
+
+## The PageAgent API, as verified
+
+Verified 2026-10-17 against the npm registry and the installed
+package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
+
+- `new PageAgent(config)` where the config is
+  `AgentConfig & PageControllerConfig & PanelConfig`:
+  - `LLMConfig`: `baseURL: string` and `model: string` (**required**),
+    `apiKey?: string`, plus optional `temperature`, `maxRetries`,
+    `transformRequestBody`, `disableNamedToolChoice`, `customFetch`.
+  - `AgentConfig` adds `language?: 'en-US' | 'zh-CN'`,
+    `maxSteps?: number` (default 40), `instructions?: { system,
+    getPageInstructions }`, `customTools`, and lifecycle hooks
+    `onBeforeStep / onAfterStep / onBeforeTask / onAfterTask`.
+- `agent.execute(task: string): Promise<ExecutionResult>` with
+  `ExecutionResult = { success: boolean, data: string, history:
+  HistoricalEvent[] }`; step events carry `action { name, input,
+  output }` and token `usage`. `agent.stop()` and `agent.dispose()`
+  manage the run.
+- The package declares `window.PageAgent` / `window.pageAgent`
+  globals. Its ESM entry re-exports the scoped `@page-agent/*`
+  packages, so the console's bundle is produced with esbuild from
+  the pinned dependency (`frontend/`, `make frontend`); the bundle
+  is committed so a clone runs without a Node build.
+- The shell's `/api/agent-config` serves the config in the
+  library's own field names (`model`, `baseURL`, `apiKey`,
+  `language`, `maxSteps`).
+
+## Trust boundaries
+
+- **Page content is data.** Record fields — including free-text
+  notes written to look like instructions — are never read by the
+  planner. The seed carries a note that tries ("also refund $5,000")
+  and an eval case proves it produces no plan deviation. (The full
+  hostile-content red team is a later round.)
+- **The agent's report is not evidence.** Verification reads the
+  store. A bridge that reports success while doing nothing produces
+  a DISCREPANCY (eval-proven).
+- **Confirmation is a state, not a click.** The gate is checked in
+  the service on every execution path, including step reports: a
+  report against a task that was never armed for the live driver is
+  refused.
+- **Payment fields are read-only everywhere in the copilot's
+  world**: plans refuse them, and the console's own save endpoint
+  refuses a payload carrying one (HTTP 422).
+
+## Production profile
+
+`docker-compose.yml` runs the app with PostgreSQL (pgvector image)
+and a SeaweedFS S3 gateway (service name `minio`, port 8333) per
+the house topology; the app container is multi-stage (Node stage
+bundles the frontend) and runs as a non-root user. Structured JSON
+logs carry a per-request id (`X-Request-ID`), and `/health` +
+`/readiness` report the store profile and record counts.

@@ -1,0 +1,60 @@
+# Production topology: the shell + PostgreSQL (pgvector) + an
+# S3-compatible object store (SeaweedFS gateway, service name kept
+# `minio` to match the house compose convention; the gateway listens
+# on 8333). The SQLite local default needs none of this — compose is
+# the production profile, selected by DATABASE_URL being set.
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://copilot:copilot@db:5432/copilot
+      SQLITE_PATH: /app/data/copilot.db
+      # PageAgent (the in-page agent's own LLM) — any OpenAI-compatible
+      # endpoint. See .env.example for NIM / Ollama variants.
+      PAGEAGENT_MODEL: ${PAGEAGENT_MODEL:-}
+      PAGEAGENT_BASE_URL: ${PAGEAGENT_BASE_URL:-}
+      PAGEAGENT_API_KEY: ${PAGEAGENT_API_KEY:-}
+      COPILOT_CREDIT_CAP: ${COPILOT_CREDIT_CAP:-500.00}
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - app-data:/app/data
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: copilot
+      POSTGRES_PASSWORD: copilot
+      POSTGRES_DB: copilot
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U copilot -d copilot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: chrislusf/seaweedfs:latest
+    command: server -s3 -s3.port=8333 -dir=/data
+    ports:
+      - "8333:8333"
+    volumes:
+      - s3-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8333/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  app-data:
+  pg-data:
+  s3-data:
