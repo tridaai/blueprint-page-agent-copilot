@@ -1172,3 +1172,61 @@ the house topology; the app container is multi-stage (Node stage
 bundles the frontend) and runs as a non-root user. Structured JSON
 logs carry a per-request id (`X-Request-ID`), and `/health` +
 `/readiness` report the store profile and record counts.
+
+## The twenty rounds
+
+The blueprint was built in twenty rounds, each one gated by the
+full test suite and the eval pack before the next began:
+
+1. **Core** — the OrderDesk console, the governed shell (intake →
+   plan → confirm gate → execute → verify → audit), the offline
+   driver beside the real `page-agent` bundle, evals v1.
+2. **Plan depth** — multi-record plans, amendments as new
+   versions, plan diffs, precondition staleness.
+3. **Permissions** — roles as governed records; allowlists
+   enforced at plan, confirmation, amendment, and execution.
+4. **Verification depth** — the console read surface, linkage
+   checks, stored verification reports, the two discrepancy exits.
+5. **Failure recovery** — numbered attempts; resume, restart,
+   abandon as recorded acts; no partial success.
+6. **Identity & attribution** — the operator directory as a
+   governed lifecycle; orphaned work and pickup; the attribution
+   check and the per-operator report folded from the trail.
+7. **Task library** — templates as governed records with pinned
+   examples; health computed on read.
+8. **Batch work** — batches with a run sheet and a folded report;
+   no bulk decisions, ever.
+9. **Audit exports** — hash-chained export documents for any
+   scope's trail, with a verifier that names the first break.
+10. **Injection red team** — hostile record text, task text,
+    bridge reports, and template slots, graded zero-tolerance
+    (`docs/red-team.md`); one real defect found and fixed — a
+    figure inside a credit reason could redirect the amount.
+11. **Budgets** — plan-step, execution-step, and wall-clock
+    ceilings in Policy, snapshotted per attempt.
+12. **Multi-page flows** — the page catalogue, the navigation
+    protocol between pages, the cross-page credit shape.
+13. **Accessibility mode** — the spoken form of a plan, read-back
+    confirmation bound to it, transcript intake, the preference
+    flag (presentation only).
+14. **Clarification** — ambiguity as a state: governed classes,
+    options computed from the records, values never invented.
+15. **Observability** — the execution trace, the failure
+    taxonomy, the daily digest, all folded from the records.
+16. **Deployment profiles** — bundle delivery × endpoint class
+    as governed config, the CSP computed from the profile, the
+    deployment snapshotted on every attempt.
+17. **MCP surface** — task-level tools only (no clicks, no
+    confirmations), the protocol in the repo's own code.
+18. **Dual control** — high-stakes plans need two distinct
+    confirmers; seats bind the plan version.
+19. **Template regression gate** — evaluations as records;
+    a version becomes the default only by promotion, judged
+    against the incumbent's examples.
+20. **Release hardening** — the production profile run live:
+    PostgreSQL 16.15 + pgvector 0.8.7, the full suite green on
+    Postgres (413 passed; 412 + 1 skipped on SQLite), the app
+    booted end to end on Postgres, and a prod smoke on a fresh
+    database. No defects were found in the Postgres dialect —
+    every SQL statement lives in the store, and the JSON
+    documents are `TEXT` in both dialects by design.

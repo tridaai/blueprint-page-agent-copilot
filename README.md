@@ -959,10 +959,20 @@ make evals   # 107/107 cases: happy paths diffed exactly (including
   stdio server runs as a local process under the deployment's
   own account; a deployment that exposes it further fronts it
   with its own transport security, the way it would the API.
-- The **PostgreSQL store leg skips** until the local stack is up
-  (env-gated, same as the sibling blueprints); the migration follows
-  the established dual-dialect pattern and the SQLite dialect is
-  exercised by the full suite.
+- The **PostgreSQL profile is verified live** (round 20,
+  2026-10-18, against PostgreSQL 16.15 with pgvector 0.8.7): the
+  full suite passes on Postgres — **413 passed**, the conformance
+  leg included — beside **412 passed + 1 skipped** on the default
+  SQLite profile (the skip is that same leg, env-gated on
+  `COPILOT_TEST_DATABASE_URL` when no stack is up). The app also
+  booted against Postgres end to end — migrations through the
+  app's own path, seed, a gold task over HTTP to VERIFIED with
+  the verdict read back from the database — and a prod smoke on a
+  fresh database (seed → serve → health/readiness → VERIFIED)
+  passed. One provisioning fact: the migration creates the
+  `vector` extension, so the database role needs it pre-created
+  by a superuser (as a DBA would provision it) or the rights to
+  create it.
 - The **Docker build has not been run** in the build environment
   (no Docker here); the Dockerfile and compose topology follow the
   house standard and are the documented production profile.
