@@ -312,16 +312,32 @@ def derive_plan(text: str, store: Store, policy: Policy,
             "refused: the copilot does not delete records; deletes are "
             "refused at plan time, not gated")
     if CREDIT_RE.search(text):
-        return _plan_credit_memo(text, store, policy, task_id)
-    if SHIP_DETAIL_RE.search(text) or STATUS_CLAUSE_RE.search(text):
-        return _plan_status(text, store, task_id)
-    if CUSTOMER_UPDATE_RE.search(text):
-        return _plan_customer_update(text, store, task_id)
-    raise PlanRefusal(
-        "no_plan_derivable",
-        "refused: no governed task shape matched this text; the "
-        "planner derives plans only for credit memos, order and "
-        "invoice status changes, and customer field updates")
+        plan = _plan_credit_memo(text, store, policy, task_id)
+    elif SHIP_DETAIL_RE.search(text) or STATUS_CLAUSE_RE.search(text):
+        plan = _plan_status(text, store, task_id)
+    elif CUSTOMER_UPDATE_RE.search(text):
+        plan = _plan_customer_update(text, store, task_id)
+    else:
+        raise PlanRefusal(
+            "no_plan_derivable",
+            "refused: no governed task shape matched this text; the "
+            "planner derives plans only for credit memos, order and "
+            "invoice status changes, and customer field updates")
+    # The plan-size budget, checked here — the one door every
+    # derivation passes — so intake, re-plan, template
+    # instantiation, and batch members all face it identically.
+    # A plan longer than the ceiling is refused at plan time with
+    # both counts named: no human is asked to confirm work the
+    # shell would not let run to its end.
+    if len(plan.steps) > policy.max_plan_steps:
+        raise PlanRefusal(
+            "plan_too_large",
+            f"refused: this task derives a plan of "
+            f"{len(plan.steps)} steps, over the governed ceiling "
+            f"of {policy.max_plan_steps} plan steps "
+            f"(COPILOT_MAX_PLAN_STEPS); state the work as smaller "
+            f"tasks")
+    return plan
 
 
 # ------------------------------------------------- corrective plans
