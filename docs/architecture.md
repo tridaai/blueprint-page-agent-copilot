@@ -716,6 +716,47 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   generated_at, generated_by). Reading a day never
   generates it: an ungenerated day reads as absent, not as
   zeros.
+- **Deployment profiles** (`config.py`, round 16) — how the
+  agent ships and where its model lives, as governed
+  configuration. A named profile (`COPILOT_PROFILE`) pairs a
+  bundle delivery with an endpoint class. Delivery: `local`,
+  the committed bundle esbuild produces from the pinned npm
+  package; or `cdn`, a script URL the deployment names in
+  `COPILOT_CDN_URL`, served into the console page in place of
+  the local bundle — the console route substitutes the one
+  script source, and nothing else in the page changes. Class:
+  `hosted`, an OpenAI-compatible endpoint outside the
+  customer's network; or `self_hosted`, one inside it (a NIM
+  container, a vLLM service). The profile validates at config
+  load and again at app startup, and refuses loud, each
+  refusal a named `ConfigError`: an unknown profile name; a
+  CDN profile with no URL, an unparseable one, one carrying
+  no `page-agent@<version>` pin, or a pin that is not
+  `PINNED_PAGE_AGENT_VERSION` — the version `frontend/
+  package.json` pins and the evals ran against, held as a
+  constant a test pins to the package file, so the page can
+  never silently load a different agent than the graded one;
+  a model base URL that does not parse; and a hosted
+  endpoint, once one is configured, with no key — the key
+  rule follows the class, because a self-hosted endpoint on
+  a trusted network often runs keyless, and a wholly
+  unconfigured endpoint is the offline default, not a
+  misconfiguration. The Content-Security-Policy is computed
+  from the profile in code and served on every response:
+  `script-src 'self'`, plus exactly the pinned CDN's origin
+  under a CDN profile; `connect-src` names 'self' plus the
+  configured model origin — the hole the in-page agent needs
+  to call its model from the browser, stated and scoped to
+  the one endpoint. `/api/agent-config` carries the profile
+  beside the library's own fields (name, delivery, endpoint
+  class, the bundle URL, the policy string), and the
+  console's footer states the deployment from that read.
+  Every execution attempt snapshots the profile at claim
+  time — name, delivery, class, model name, never the key —
+  beside its budget snapshot, so the audit answers which
+  deployment ran a task even after the deployment changes;
+  attempts from before profiles carry empty fields, their
+  deployment unknown rather than backfilled.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -844,7 +885,10 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   is committed so a clone runs without a Node build.
 - The shell's `/api/agent-config` serves the config in the
   library's own field names (`model`, `baseURL`, `apiKey`,
-  `language`, `maxSteps`).
+  `language`, `maxSteps`), plus the deployment profile's
+  fields (`profile`, `delivery`, `endpointClass`, `bundleURL`,
+  `csp`) — the shell's additions beside the library's, never
+  in their place.
 
 ## Trust boundaries
 
@@ -895,6 +939,18 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   fails in the open, naming the budget — it never completes
   "mostly within budget", and a runaway bridge cannot spend
   steps the shell has not counted.
+- **The deployment is named, pinned, and on the record.** The
+  page loads the agent the profile names — the committed
+  bundle, or a CDN script whose version pin equals the
+  bundled, graded version; a mismatch refuses at load rather
+  than serving a different agent quietly. The CSP the app
+  serves is the profile's own statement of where scripts may
+  come from and where the page may call — 'self', the one
+  pinned CDN origin, the one configured model origin — and
+  every attempt records the deployment it ran under, so a
+  task's history names its deployment as it names its driver
+  and its budget. The API key is part of none of it: the
+  profile records the endpoint's class, never its secret.
 - **Verification happens once.** It is an act with a record, run
   at the end of execution; asking for it again is a recorded
   refusal, not a recomputation — a verdict that could be re-run

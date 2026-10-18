@@ -178,6 +178,34 @@ evidence.
   protocol refusal never ends an execution, so it is not an
   ending class). The fold is stored as a dated snapshot;
   regenerating a day replaces it at a bumped version.
+- **Deployment profiles** — how the agent ships and where its
+  model lives is a named, governed choice (`COPILOT_PROFILE`),
+  not an accident of how the page was pasted together. A
+  profile pairs a **bundle delivery** — `local`, the committed
+  bundle built from the pinned npm package, or `cdn`, a script
+  URL the deployment names, served into the page instead —
+  with a **model endpoint class**: `hosted`, an
+  OpenAI-compatible endpoint outside the customer's network,
+  or `self_hosted`, one inside it (a NIM container, a vLLM
+  service). The CDN pin is checked at load: the URL must carry
+  the `page-agent@` version this repo bundles and grades, and
+  a mismatch refuses with both versions named — the page never
+  silently loads a different agent than the one the evals ran
+  against. The key rule follows the class: a hosted endpoint,
+  once configured, requires a key; a self-hosted one may run
+  keyless. The app serves a **Content-Security-Policy**
+  computed from the profile — `script-src 'self'` plus, for a
+  CDN profile, exactly the pinned CDN's origin; `connect-src`
+  naming the one configured model endpoint, the hole the
+  in-page agent needs stated deliberately. `/api/agent-config`
+  carries the profile beside the library's fields, the
+  console's footer states the deployment it is running, and
+  every execution attempt records the profile it ran under —
+  delivery, endpoint class, model name, never the key — so
+  the audit answers which deployment ran a task. Misconfig-
+  uration fails loud at startup, each refusal named: unknown
+  profile, missing or unpinned or mismatched CDN URL,
+  unparseable model address, hosted endpoint without a key.
 - **Plan amendments and diffs** — while a plan awaits confirmation,
   an operator may amend its values; every amended value passes the
   same policy checks as planning, the amendment becomes plan
@@ -394,6 +422,23 @@ PAGEAGENT_MODEL=qwen-plus
 PAGEAGENT_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 PAGEAGENT_API_KEY=...
 ```
+
+Deployment profile: `COPILOT_PROFILE` names how the agent is
+delivered and where the model lives — `local-hosted` (the
+default: the committed bundle, a hosted endpoint),
+`local-self-hosted`, `cdn-hosted`, or `cdn-self-hosted`. A CDN
+profile serves the script at `COPILOT_CDN_URL` into the console
+page instead of the committed bundle; the URL must carry the
+pin for the bundled version (today
+`https://cdn.jsdelivr.net/npm/page-agent@1.12.4/dist/iife/page-agent.demo.js`
+is the shape), and a pin that names any other version refuses
+at startup with both versions stated. A hosted profile
+requires `PAGEAGENT_API_KEY` once an endpoint is configured;
+a self-hosted profile (a NIM container, a vLLM service on the
+customer's network) may leave it empty. The
+Content-Security-Policy the app serves follows the profile:
+script sources are the bundle's home only, and `connect-src`
+names the configured model endpoint's origin.
 
 Store profile: SQLite is the local default (`SQLITE_PATH`, a single
 file at `./data/copilot.db`). Set `DATABASE_URL` and the same code
@@ -623,12 +668,14 @@ src/page_agent_copilot/
   dataset.py      the OrderDesk seed data (generated in code; gold
                   task outcomes hold by construction)
   models.py       records, plans, steps, tasks, audit shapes
-  config.py       store profile, policy, PageAgent LLM settings
+  config.py       store profile, policy, PageAgent LLM settings,
+                  and the deployment profiles (delivery, endpoint
+                  class, the CDN pin, the CSP)
   static/         the OrderDesk console + the live bridge (copilot.js)
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (88 cases)
+evals/            the scripted-task gate (92 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -636,9 +683,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 336 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 359 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 88/88 cases: happy paths diffed exactly (including
+make evals   # 92/92 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -755,7 +802,15 @@ make evals   # 88/88 cases: happy paths diffed exactly (including
              # digest graded against a recount taken from the
              # task records by a separate path (regeneration
              # bumping the version), and taxonomy pins naming
-             # every ending class
+             # every ending class — and deployment profiles:
+             # the local profile serving the committed bundle
+             # under a self-only script policy, the CDN profile
+             # serving the pinned script with its origin named
+             # in the CSP and its version matching the bundle,
+             # a self-hosted keyless deployment validating with
+             # the attempt recording the deployment it ran
+             # under, and a hosted endpoint without a key
+             # refusing at config load, by name
 ```
 
 ## Honest status
