@@ -986,9 +986,14 @@ def _():
     expect(old.template_version == 1
            and old.status == TaskStatus.PLANNED,
            f"old version stamp {old.template_version}")
+    # Round 19 changed the name-only half of this case by
+    # design: a bare publish no longer moves the default, so a
+    # name-only instantiation still resolves to the seeded v1.
+    # The gate that does move it is graded in the template
+    # regression gate section below.
     new = svc.instantiate_template("order-status", None, slots, "op")
-    expect(new.template_version == 2,
-           f"current version stamp {new.template_version}")
+    expect(new.template_version == 1,
+           f"name-only version stamp {new.template_version}")
     entry = [e for e in svc.audit(old.task_id)
              if e["event"] == "template_instantiated"][0]
     expect(entry["detail"]["requested_version"] == 1
@@ -1053,6 +1058,201 @@ def _():
         health = svc.template_health(template)
         expect(health["ok"],
                f"{template.name} v{template.version}: {health}")
+
+
+# -- Round 19: the template regression gate --------------------------------
+# A version becomes the default only by passing: a recorded
+# evaluation of its exact content hash, by hands other than the
+# publisher's; a promoter who is not the publisher; and no
+# regression against the standing default's examples, judged on
+# the incumbent's ruler. The seeded versions are grandfathered
+# as defaults — their standing the health, no evaluation records
+# fabricated for them. The controls below run in the spirit of
+# blueprint #12's profile gate: negative, regression, positive,
+# rollback, tamper.
+
+BROKEN_ORDER_STATUS_V2 = {
+    **ORDER_STATUS_V2,
+    "description": "A single order status change (broken pins).",
+    "examples": [{
+        "slots": {"order": "1036", "status": "packed"},
+        "task_type": "order_status",
+        "steps": [{"action": "set", "record_kind": "orders",
+                   "record_id": "1036", "field": "status",
+                   "value": "shipped"}]}],
+}
+
+DUO_SLOTS = [
+    {"name": "order", "kind": "record", "record_kind": "orders"},
+    {"name": "status", "kind": "text"},
+]
+DUO_EXAMPLES = [
+    {"slots": {"order": "1036", "status": "packed"},
+     "task_type": "order_status",
+     "steps": [{"action": "set", "record_kind": "orders",
+                "record_id": "1036", "field": "status",
+                "value": "packed"}]},
+    {"slots": {"order": "1032", "status": "shipped"},
+     "task_type": "order_status",
+     "steps": [{"action": "set", "record_kind": "orders",
+                "record_id": "1032", "field": "status",
+                "value": "shipped"}]},
+]
+DUO_V1 = {
+    "name": "gate-duo",
+    "pattern": "mark order {order} as {status}",
+    "description": "Two standing scenarios, one template.",
+    "slots": DUO_SLOTS,
+    "examples": DUO_EXAMPLES,
+}
+DUO_V2 = {
+    **DUO_V1,
+    "pattern": ("mark order {order} as {status} and mark "
+                "invoice 4474 as paid"),
+    "description": "Now with the invoice settled in the same task.",
+    "examples": [
+        {**example, "task_type": "status_changes",
+         "steps": example["steps"] + [
+             {"action": "set", "record_kind": "invoices",
+              "record_id": "4474", "field": "status",
+              "value": "paid"}]}
+        for example in DUO_EXAMPLES],
+}
+
+
+def gate_refusals(svc):
+    return [e["detail"]["code"] for e in svc.template_audit()
+            if e["event"] == "template_refused"]
+
+
+def gate_setup():
+    svc = fresh()
+    svc.enroll_operator("s.hale", "r.osei", "supervisor")
+    return svc
+
+
+@case("template gate: promotion is earned — evaluate, then promote")
+def _():
+    svc = gate_setup()
+    # The seeded default is grandfathered: standing `seeded`,
+    # and the gate books hold nothing for it.
+    view = svc.template_view(svc.get_template("order-status"))
+    expect(view["default"] and view["standing"] == "seeded",
+           f"seeded view {view['standing']}")
+    expect(svc.template_evaluations("order-status") == []
+           and svc.template_promotions("order-status") == [],
+           "grandfathering fabricated gate records")
+    svc.publish_template("s.hale", ORDER_STATUS_V2)
+    try:
+        svc.promote_template("r.osei", "order-status", 2)
+        expect(False, "promotion without an evaluation succeeded")
+    except GateError:
+        pass
+    expect(gate_refusals(svc) == ["no_evaluation"],
+           f"refusals {gate_refusals(svc)}")
+    svc.evaluate_template("op", "order-status", 2)
+    try:
+        svc.promote_template("s.hale", "order-status", 2)
+        expect(False, "the publisher promoted their own version")
+    except GateError:
+        pass
+    expect(gate_refusals(svc)[-1] == "promoter_was_publisher",
+           f"refusals {gate_refusals(svc)}")
+    record = svc.promote_template("r.osei", "order-status", 2)
+    expect(record["previous_default"] == 1,
+           f"promotion {record}")
+    task = svc.instantiate_template(
+        "order-status", None, {"order": "1036", "status": "packed"},
+        "op")
+    expect(task.template_version == 2,
+           f"name-only stamp {task.template_version}")
+    # Rollback: the seeded version's standing is its health, and
+    # promoting it back restores the default.
+    svc.promote_template("r.osei", "order-status", 1)
+    task = svc.instantiate_template(
+        "order-status", None, {"order": "1036", "status": "packed"},
+        "op")
+    expect(task.template_version == 1,
+           f"rollback stamp {task.template_version}")
+
+
+@case("template gate: a failing candidate cannot promote")
+def _():
+    svc = gate_setup()
+    svc.publish_template("s.hale", BROKEN_ORDER_STATUS_V2)
+    record = svc.evaluate_template("op", "order-status", 2)
+    expect(record["ok"] is False, f"evaluation {record['ok']}")
+    try:
+        svc.promote_template("r.osei", "order-status", 2)
+        expect(False, "a failing candidate was promoted")
+    except GateError as err:
+        expect("1036" in str(err), f"refusal names nothing: {err}")
+    expect(gate_refusals(svc) == ["evaluation_failed"],
+           f"refusals {gate_refusals(svc)}")
+    expect(svc.default_template("order-status").version == 1,
+           "the default moved to a failing candidate")
+
+
+@case("template gate: regression refuses, naming the scenarios it breaks")
+def _():
+    svc = gate_setup()
+    svc.publish_template("s.hale", DUO_V1)
+    svc.evaluate_template("op", "gate-duo", 1)
+    svc.promote_template("r.osei", "gate-duo", 1)
+    svc.publish_template("s.hale", DUO_V2)
+    record = svc.evaluate_template("op", "gate-duo", 2)
+    expect(record["ok"] is True,
+           "the candidate does not pass its own pins")
+    try:
+        svc.promote_template("r.osei", "gate-duo", 2)
+        expect(False, "a regressing candidate was promoted")
+    except GateError as err:
+        expect("1036" in str(err) and "1032" in str(err),
+               f"refusal does not name both scenarios: {err}")
+    expect(gate_refusals(svc) == ["regression"],
+           f"refusals {gate_refusals(svc)}")
+    expect(svc.default_template("gate-duo").version == 1,
+           "the default moved to a regressing candidate")
+
+
+@case("template gate: content changed after evaluation refuses on hash")
+def _():
+    svc = gate_setup()
+    svc.publish_template("s.hale", ORDER_STATUS_V2)
+    svc.evaluate_template("op", "order-status", 2)
+    raw = next(r for r in svc.store.list_records("templates")
+               if r["id"] == "order-status:v2")
+    svc.store.upsert_record("templates", {
+        **raw, "description": "Edited after evaluation."})
+    try:
+        svc.promote_template("r.osei", "order-status", 2)
+        expect(False, "promotion on a stale evaluation succeeded")
+    except GateError:
+        pass
+    expect(gate_refusals(svc) == ["hash_mismatch"],
+           f"refusals {gate_refusals(svc)}")
+
+
+@case("template gate: a brand-new template has no default until promoted")
+def _():
+    svc = gate_setup()
+    svc.publish_template("s.hale", {
+        **ORDER_STATUS_V2, "name": "order-status-copy"})
+    try:
+        svc.instantiate_template(
+            "order-status-copy", None,
+            {"order": "1036", "status": "packed"}, "op")
+        expect(False, "an unpromoted template served name-only")
+    except TemplateError as err:
+        expect(err.code == "no_promoted_default", f"code {err.code}")
+    svc.evaluate_template("op", "order-status-copy", 1)
+    svc.promote_template("r.osei", "order-status-copy", 1)
+    task = svc.instantiate_template(
+        "order-status-copy", None,
+        {"order": "1036", "status": "packed"}, "op")
+    expect(task.template_version == 1
+           and task.status == TaskStatus.PLANNED,
+           f"stamp {task.template_version}, status {task.status}")
 
 
 # -- Round 8: batch work, without bulk decisions ---------------------------
