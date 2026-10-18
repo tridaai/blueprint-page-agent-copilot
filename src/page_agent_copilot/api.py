@@ -22,9 +22,11 @@ from .config import Settings
 from .logging_setup import new_request_id, setup_logging
 from .models import (
     PAYMENT_FIELDS,
+    AcceptDeviationIn,
     AmendIn,
     ConfirmIn,
     ConsoleSaveIn,
+    CorrectiveIn,
     ExecuteIn,
     RejectIn,
     ReplanIn,
@@ -242,6 +244,27 @@ def create_app(settings: Optional[Settings] = None,
         # so this is refused (409) and the refusal is recorded.
         report = service.verify_task(task_id, body.operator)
         return report.model_dump(mode="json")
+
+    @app.post("/api/tasks/{task_id}/corrective", status_code=201)
+    def corrective(task_id: str, body: CorrectiveIn):
+        # Exit one from a DISCREPANCY: a linked corrective task
+        # whose plan closes the named diffs. It is a task like any
+        # other from here — confirm, execute, verify — and the
+        # parent stays DISCREPANCY with its report untouched.
+        child = service.spawn_corrective(task_id, body.operator)
+        plan = service.get_plan(child.task_id)
+        return {"task": child.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json") if plan else None}
+
+    @app.post("/api/tasks/{task_id}/accept-deviation")
+    def accept_deviation(task_id: str, body: AcceptDeviationIn):
+        # Exit two: a supervisor accepts the named deviation, with
+        # a mandatory reason. The task closes DISCREPANCY_ACCEPTED
+        # — never VERIFIED — and the refusal paths (not a
+        # supervisor, no reason, wrong state) are 409s.
+        task = service.accept_deviation(
+            task_id, body.operator, body.reason)
+        return task.model_dump(mode="json")
 
     @app.get("/api/tasks/{task_id}/plans")
     def plans(task_id: str):

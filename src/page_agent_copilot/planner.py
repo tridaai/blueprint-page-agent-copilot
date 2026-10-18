@@ -41,6 +41,7 @@ from .models import (
     PlanStep,
     RecordPrecondition,
     StepAction,
+    VerificationReport,
     money,
 )
 from .policy import PlanRefusal, check_credit, check_field_change
@@ -296,6 +297,87 @@ def derive_plan(text: str, store: Store, policy: Policy,
         "refused: no governed task shape matched this text; the "
         "planner derives plans only for credit memos, order and "
         "invoice status changes, and customer field updates")
+
+
+# ------------------------------------------------- corrective plans
+
+def build_corrective_steps(plan: Plan,
+                           report: VerificationReport) -> list[PlanStep]:
+    """Derive the steps of a corrective plan from a verification
+    report: only the steps whose checks failed, carrying the
+    parent plan's values — the corrective closes the named
+    differences, nothing else.
+
+    What a plan can close, and what it cannot:
+
+    - A SET step whose field check (or execution-record check)
+      failed is re-run as planned: setting the field to the
+      planned value is a governed act.
+    - A CREATE step whose record was never created is re-issued
+      as planned.
+    - A CREATE step whose record WAS created with wrong values
+      cannot be closed by any plan: a credit memo is issued whole
+      and is never edited by a plan, and issuing a second one
+      would leave two memos where the plan wanted one fact. The
+      derivation refuses (`corrective_cannot_close`), naming the
+      step and the fields — the discrepancy's remaining exit is a
+      supervisor accepting the deviation, on the record.
+    - A linkage failure on a field no plan may set (a touched
+      record's `customer_id` no longer naming an existing customer)
+      is likewise unclosable by a plan, and refuses the same way.
+
+    Raises PlanRefusal; nothing is built halfway."""
+    field_failed: dict[int, list[str]] = {}
+    for check in report.field_checks:
+        if check.verdict != "match":
+            field_failed.setdefault(check.seq, []).append(check.field)
+    linkage_failed: dict[int, list] = {}
+    for check in report.linkage_checks:
+        if check.verdict != "match":
+            linkage_failed.setdefault(check.seq, []).append(check)
+
+    steps: list[PlanStep] = []
+    for step in plan.steps:
+        failed_fields = field_failed.get(step.seq, [])
+        failed_links = linkage_failed.get(step.seq, [])
+        if not failed_fields and not failed_links:
+            continue
+        if step.action == StepAction.SET:
+            blockers = [c for c in failed_links
+                        if c.check == "customer_link"]
+            if blockers:
+                raise PlanRefusal(
+                    "corrective_cannot_close",
+                    f"refused: step {step.seq}'s linkage failure "
+                    f"names '{blockers[0].field}' on "
+                    f"{step.record_kind} {step.record_id}, a field "
+                    f"no plan may set; no corrective plan can close "
+                    f"it")
+            steps.append(_set_step(
+                len(steps) + 1, step.record_kind,
+                step.record_id or "", step.field or "",
+                step.value or ""))
+            continue
+        # CREATE: closable only if the record was never created.
+        created = any(
+            c.seq == step.seq and c.record_id != "(not created)"
+            for c in report.field_checks)
+        if created:
+            names = failed_fields + [c.field for c in failed_links]
+            raise PlanRefusal(
+                "corrective_cannot_close",
+                f"refused: step {step.seq} created "
+                f"{step.record_kind[:-1]} with differing fields "
+                f"({', '.join(names)}); a created record is never "
+                f"edited by a plan, so no corrective plan can close "
+                f"this difference")
+        steps.append(_credit_step(len(steps) + 1, dict(step.fields)))
+    if not steps:
+        raise PlanRefusal(
+            "corrective_cannot_close",
+            "refused: the verification report names no difference "
+            "a corrective plan can close")
+    return steps
 
 
 # ------------------------------------------------------- preconditions

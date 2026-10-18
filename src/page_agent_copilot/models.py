@@ -138,6 +138,10 @@ class TaskStatus(str, Enum):
     CONFIRMED = "CONFIRMED"        # a named operator approved the plan
     VERIFIED = "VERIFIED"          # executed; post-state == plan, exactly
     DISCREPANCY = "DISCREPANCY"    # executed; post-state != plan (named)
+    DISCREPANCY_ACCEPTED = "DISCREPANCY_ACCEPTED"
+                                   # a supervisor accepted the named
+                                   # deviation, with a reason; terminal,
+                                   # and never rewritten to VERIFIED
     REFUSED = "REFUSED"            # refused at plan time by policy
     STALE = "STALE"                # a record the plan rests on changed
                                    # between planning and execution;
@@ -164,6 +168,15 @@ class Task(BaseModel):
     stale_records: list[str] = Field(default_factory=list)
     refusal_reason: Optional[str] = None
     driver: Optional[str] = None
+    # The correction chain, recorded both ways: a corrective task
+    # names the task whose discrepancy spawned it here, and that
+    # task lists the corrective in `corrective_task_ids`.
+    parent_task_id: Optional[str] = None
+    corrective_task_ids: list[str] = Field(default_factory=list)
+    # The deviation acceptance, when a supervisor closes a
+    # discrepancy by accepting it: who, and the mandatory reason.
+    deviation_accepted_by: Optional[str] = None
+    deviation_reason: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -342,6 +355,21 @@ class RoleUpdateIn(BaseModel):
     can_amend: bool = False
     can_execute: bool = False
     can_administer: bool = False
+
+
+class CorrectiveIn(BaseModel):
+    """Spawn a corrective task for a DISCREPANCY task. The operator
+    is the corrective plan's planner — the R3 role rules apply to
+    it exactly as to any plan."""
+    operator: str
+
+
+class AcceptDeviationIn(BaseModel):
+    """Accept a discrepancy's named deviation. A supervisor act
+    (a role with can_administer), and the reason is mandatory:
+    an acceptance without one is refused."""
+    operator: str
+    reason: str = ""
 
 
 class VerifyIn(BaseModel):

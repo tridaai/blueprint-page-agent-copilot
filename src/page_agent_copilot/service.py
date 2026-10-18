@@ -16,6 +16,19 @@ not by the API layer and never by the agent:
     STALE -> PLANNED            (re-plan: a fresh version derived
                                  from the records as they now stand,
                                  the stale version kept, superseded)
+    DISCREPANCY -> (a corrective task)   (a linked follow-up task
+                                 whose plan closes the named diffs,
+                                 through the full gate cycle)
+    DISCREPANCY -> DISCREPANCY_ACCEPTED  (a supervisor accepts the
+                                 named deviation, with a reason)
+
+Verification is an act with a stored record, not a recomputation:
+it runs once, at the end of execution, re-reading the records
+through the console read surface (reads.py) — never through the
+mutation path the work went in by — and a second verification of
+the same task is refused. A task in DISCREPANCY has exactly the
+two recorded exits above; its report is never edited away, and no
+exit rewrites it to VERIFIED.
 
 Executing an unconfirmed plan raises GateError (the API maps it to
 HTTP 409). Confirmation binds an exact plan version, and execution
@@ -60,6 +73,7 @@ from .models import (
 from .plandiff import diff_plans
 from .planner import (
     amend_steps,
+    build_corrective_steps,
     capture_preconditions,
     derive_plan,
     stale_records,
@@ -724,3 +738,149 @@ class CopilotService:
             f"task {task_id} has nothing to verify: verification "
             f"runs at the end of execution and is recorded then "
             f"(the task is {task.status.value})")
+
+    # -- the discrepancy exits -------------------------------------------
+    def spawn_corrective(self, task_id: str, operator: str) -> Task:
+        """Exit one from a DISCREPANCY: a corrective task.
+
+        The corrective is a new task, linked both ways (its
+        `parent_task_id`, the parent's `corrective_task_ids`),
+        whose plan is derived from the parent's verification
+        report to close the named diffs — only those steps, only
+        those fields. It then goes through the whole cycle on its
+        own: confirmation by a second person, execution, its own
+        verification. The parent stays DISCREPANCY; its report is
+        never edited, and its correction chain is composed at read
+        time from the task records.
+
+        The spawner is the corrective plan's planner, so the R3
+        role rules apply whole: the name must hold a plan-capable
+        role, and the corrective plan must fit that role's
+        allowlist (a corrective for a supervisor-only field is a
+        supervisor's to spawn). A difference no plan can close —
+        a memo created with wrong values, a linkage field no plan
+        may set — refuses the spawn, recorded, with the reason;
+        the remaining exit is accepting the deviation."""
+        task = self._require_task(task_id)
+        if task.status != TaskStatus.DISCREPANCY:
+            raise GateError(
+                f"task {task_id} is {task.status.value}; only a "
+                f"DISCREPANCY task can spawn a corrective task")
+        role = self.role_of(operator)
+        if role is None or not role.can_plan:
+            code = ("unknown_operator" if role is None
+                    else "role_cannot_plan")
+            reason = (f"'{operator}' holds no role" if role is None
+                      else f"role '{role.name}' may not plan work")
+            self._audit(task_id, operator, "corrective_refused", {
+                "code": code, "reason": reason})
+            raise GateError(
+                f"corrective task for {task_id} refused: {reason}")
+        for child_id in task.corrective_task_ids:
+            child = self.get_task(child_id)
+            if child is not None and child.status == TaskStatus.VERIFIED:
+                self._audit(task_id, operator, "corrective_refused", {
+                    "code": "already_corrected",
+                    "reason": f"corrective task {child_id} already "
+                              f"closed these differences and "
+                              f"verified",
+                    "corrective_task_id": child_id})
+                raise GateError(
+                    f"task {task_id} already has a verified "
+                    f"corrective task ({child_id}); its differences "
+                    f"are closed")
+        report = self._stored_verification(task_id)
+        assert report is not None  # a DISCREPANCY verdict wrote one
+        parent_plan = self._bound_plan(task)
+        try:
+            steps = build_corrective_steps(parent_plan, report)
+        except PlanRefusal as refusal:
+            self._audit(task_id, operator, "corrective_refused", {
+                "code": refusal.code, "reason": refusal.message})
+            raise GateError(refusal.message)
+        child_id = f"TASK-{uuid.uuid4().hex[:8].upper()}"
+        plan = Plan(
+            task_id=child_id, version=1, task_type="corrective",
+            summary=summarize_steps(steps), steps=steps)
+        problems = plan_problems(role, plan)
+        if problems:
+            first = problems[0]
+            self._audit(task_id, operator, "corrective_refused", {
+                "code": first["problem"],
+                "reason": describe_problem(role, first)})
+            raise GateError(
+                f"corrective task for {task_id} refused: "
+                f"{describe_problem(role, first)} — the corrective "
+                f"plan must fit the spawner's role")
+        plan.created_at = _now()
+        plan.preconditions = capture_preconditions(self.store, plan)
+        child = Task(
+            task_id=child_id,
+            text=(f"Corrective for {task_id}: close the differences "
+                  f"verification named in plan v{parent_plan.version}"),
+            operator=operator, status=TaskStatus.PLANNED,
+            plan_version=1, parent_task_id=task_id,
+            created_at=_now(), updated_at=_now())
+        self.store.put_task(child.model_dump(mode="json"))
+        self.store.put_plan(plan.model_dump(mode="json"))
+        self._audit(child_id, operator, "task_created", {
+            "text": child.text, "parent_task_id": task_id,
+            "source": "corrective"})
+        self._audit(child_id, "planner", "plan_created", {
+            "plan_version": 1, "task_type": "corrective",
+            "summary": plan.summary, "steps": len(steps)})
+        task.corrective_task_ids.append(child_id)
+        self._save(task)
+        self._audit(task_id, operator, "corrective_spawned", {
+            "corrective_task_id": child_id,
+            "closes": [d.model_dump(mode="json")
+                       for d in report.diffs]})
+        return child
+
+    def accept_deviation(self, task_id: str, operator: str,
+                         reason: str) -> Task:
+        """Exit two from a DISCREPANCY: a supervisor accepts the
+        named deviation, with a reason, and the task closes as
+        DISCREPANCY_ACCEPTED — a distinct terminal state, never
+        rewritten to VERIFIED, with the original report untouched.
+
+        Supervisor-only in role terms: the accepting name must hold
+        a role with can_administer (the supervisor's capability).
+        The reason is mandatory — an acceptance names the diffs it
+        accepts (they ride in the audit entry from the stored
+        report) and states why; an empty reason is refused, and
+        every refusal is recorded before it raises."""
+        task = self._require_task(task_id)
+        if task.status != TaskStatus.DISCREPANCY:
+            raise GateError(
+                f"task {task_id} is {task.status.value}; only a "
+                f"DISCREPANCY task has a deviation to accept")
+        if not (reason or "").strip():
+            self._audit(task_id, operator, "deviation_refused", {
+                "code": "reason_required",
+                "reason": "accepting a deviation requires a stated "
+                          "reason"})
+            raise GateError(
+                f"deviation on task {task_id} not accepted: a "
+                f"reason is required — the acceptance names the "
+                f"differences and states why they stand")
+        role = self.role_of(operator)
+        if role is None or not role.can_administer:
+            why = (f"'{operator}' holds no role" if role is None
+                   else f"role '{role.name}' may not accept "
+                        f"deviations")
+            self._audit(task_id, operator, "deviation_refused", {
+                "code": "not_a_supervisor", "reason": why})
+            raise GateError(
+                f"deviation on task {task_id} not accepted: {why}; "
+                f"accepting a deviation is a supervisor act")
+        report = self._stored_verification(task_id)
+        diffs = report.diffs if report else []
+        task.status = TaskStatus.DISCREPANCY_ACCEPTED
+        task.deviation_accepted_by = operator
+        task.deviation_reason = reason.strip()
+        self._save(task)
+        self._audit(task_id, operator, "deviation_accepted", {
+            "reason": task.deviation_reason,
+            "diffs": [d.model_dump(mode="json") for d in diffs]})
+        return task
