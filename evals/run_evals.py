@@ -468,6 +468,133 @@ def _():
         raise AssertionError("an operator edited a role definition")
 
 
+@case("verify depth: a write after the work is caught by the re-read")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped", "op")
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "page-agent-live")
+    apply_field_change(svc.store, "orders", "1032", "status", "shipped")
+    # The record is written again afterwards — another hand, a
+    # buggy form handler. Verification re-reads through the console
+    # read surface; what it diffs is the state that stands, not the
+    # work it saw reported.
+    record = svc.store.get_record("orders", "1032")
+    record["status"] = "delivered"
+    svc.store.upsert_record("orders", record)
+    task = svc.report_step(task.task_id, 1, StepReportIn(ok=True))
+    expect(task.status == TaskStatus.DISCREPANCY, f"status {task.status}")
+    report = svc.get_verification(task.task_id)
+    expect(report is not None
+           and report.read_path == "console_read_surface",
+           f"report {report}")
+    check = report.field_checks[0]
+    expect(check.expected == "shipped" and check.actual == "delivered"
+           and check.verdict == "mismatch", f"check {check}")
+
+
+@case("verify depth: a memo against the wrong invoice is caught and named")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "page-agent-live")
+    # A faulty bridge issues the memo against the wrong invoice.
+    create_credit_memo(svc.store, {
+        "invoice_id": "4472", "amount": "120.00",
+        "reason": "damaged goods", "status": "issued"},
+        task_id=task.task_id)
+    task = svc.report_step(task.task_id, 1, StepReportIn(ok=True))
+    expect(task.status == TaskStatus.DISCREPANCY, f"status {task.status}")
+    report = svc.get_verification(task.task_id)
+    fields = {d.field for d in report.diffs}
+    expect("invoice_id" in fields and "customer_id" in fields,
+           f"diff fields {fields}")
+    link = [c for c in report.linkage_checks
+            if c.check == "memo_customer"][0]
+    expect(link.verdict == "mismatch" and link.expected == "2041"
+           and link.actual == "2042", f"linkage {link}")
+
+
+@case("discrepancy: a corrective task closes the diffs, chain on the report")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped", "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline", tamper={1: "placed"})
+    expect(task.status == TaskStatus.DISCREPANCY, f"status {task.status}")
+    child = svc.spawn_corrective(task.task_id, "op")
+    expect(child.parent_task_id == task.task_id
+           and child.status == TaskStatus.PLANNED,
+           f"child {child.status}")
+    parent = svc.get_task(task.task_id)
+    expect(parent.corrective_task_ids == [child.task_id],
+           f"parent links {parent.corrective_task_ids}")
+    svc.confirm(child.task_id, "s.hale")
+    child = svc.execute(child.task_id, "offline")
+    expect(child.status == TaskStatus.VERIFIED, f"child {child.status}")
+    expect(svc.store.get_record("orders", "1032")["status"] == "shipped",
+           "the corrective did not land")
+    parent = svc.get_task(task.task_id)
+    expect(parent.status == TaskStatus.DISCREPANCY,
+           "the parent's verdict was rewritten")
+    report = svc.get_verification(task.task_id)
+    expect(len(report.corrections) == 1
+           and report.corrections[0].task_id == child.task_id
+           and report.corrections[0].verification_ok is True,
+           f"corrections {report.corrections}")
+
+
+@case("discrepancy: deviation accepted — supervisor, reason, never VERIFIED")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped", "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline", tamper={1: "placed"})
+    expect(task.status == TaskStatus.DISCREPANCY, f"status {task.status}")
+    for operator, reason in (("op", "the carrier collected it"),
+                             ("s.hale", "")):
+        try:
+            svc.accept_deviation(task.task_id, operator, reason)
+        except GateError:
+            pass
+        else:
+            raise AssertionError(
+                f"deviation accepted by {operator!r} reason {reason!r}")
+    task = svc.accept_deviation(
+        task.task_id, "s.hale",
+        "the carrier's own scan shows collection; the record stands")
+    expect(task.status == TaskStatus.DISCREPANCY_ACCEPTED,
+           f"status {task.status}")
+    expect(task.deviation_accepted_by == "s.hale"
+           and task.deviation_reason, "the acceptance is not recorded")
+    report = svc.get_verification(task.task_id)
+    expect(report.ok is False, "the report was rewritten to a pass")
+
+
+@case("verify: re-verification is refused and the record stands")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    before = svc.get_verification(task.task_id)
+    expect(before is not None and before.ok, "no report recorded")
+    try:
+        svc.verify_task(task.task_id, "op")
+    except GateError:
+        pass
+    else:
+        raise AssertionError("a second verification ran")
+    after = svc.get_verification(task.task_id)
+    expect(after.verified_at == before.verified_at and after.ok,
+           "the recorded report changed")
+    refused = [e for e in svc.audit(task.task_id)
+               if e["event"] == "reverification_refused"]
+    expect(len(refused) == 1, f"audit {refused}")
+
+
 def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     for name, ok, detail in RESULTS:
