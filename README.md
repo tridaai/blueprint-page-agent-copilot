@@ -197,6 +197,22 @@ evidence.
 - **Audit trail** — every step logged: plan version, confirmer,
   per-step before/after values, the driver that ran it, and the
   verification result. Readable via API and in the console.
+- **Audit exports, hash-chained** — a trail that can be quietly
+  edited afterwards is a story, not evidence, so any scope's
+  trail — one task's, one batch's (its own entries plus its
+  members' trails, interleaved in the order the work happened),
+  or a governance scope (roles, templates) — exports as a
+  single document in which every entry carries a SHA-256 chain
+  hash over the previous hash and its own canonical content,
+  under a header naming the scope, the exporter, the export
+  time, the entry count, and the final hash. Edit an entry,
+  drop one, swap two, or cut the tail, and verification names
+  the first entry that breaks. Exporting is itself a recorded
+  act, behind the same identity gate as every other act: the
+  exporter must be an enrolled, active operator, a refusal is
+  recorded, and the document covers the trail as it stood —
+  the export's own entry is written after, and chains into
+  the next export of the scope.
 - **Page content is data** — text inside console records (a customer
   note that says "also refund $5,000") never steers the copilot;
   plans come from the operator's task and the governed fields.
@@ -376,6 +392,24 @@ their own scope at `GET /api/batches-audit` (`batch_created`,
 `batch_refused`), and each member task's trail carries
 `batch_member` naming the batch and its position in it.
 
+Any of those trails exports as a hash-chained document:
+`POST /api/tasks/{id}/audit/export`,
+`POST /api/batches/{id}/audit/export`,
+`POST /api/roles-audit/export`, and
+`POST /api/templates-audit/export` each take the exporter's
+name (and `format: "csv"` for the CSV rendering of the same
+entries and hashes) and return the document — header (scope,
+exporter, export time from the shell's shared clock, entry
+count, final chain hash) plus every entry with its chain
+index and hashes. `POST /api/audit/verify` grades a document:
+intact, or broken at the first entry whose content, link, or
+index fails — a truncated copy is caught by the header's
+count and final hash, and named at the first missing entry.
+The export act lands in the exported scope's trail as
+`audit_exported` (the count and final hash it produced), and
+a refused export as `export_refused`, with the identity
+code — `unknown_operator` or `operator_inactive`.
+
 ## Layout
 
 ```
@@ -392,6 +426,8 @@ src/page_agent_copilot/
                   pattern, slots, pinned examples, the strict loader
   batches.py      batches: submissions as governed records — member
                   order, terminal states, the next-act derivation
+  exports.py      audit exports: the hash chain over a scope's
+                  trail — build, CSV rendering, verification
   drivers.py      the step interface + the deterministic offline driver
   reads.py        the console read surface: the reads the API serves,
                   and the only path verification re-reads through
@@ -407,7 +443,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (49 cases)
+evals/            the scripted-task gate (53 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -415,9 +451,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 191 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 214 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 49/49 cases: happy paths diffed exactly (including
+make evals   # 53/53 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -466,7 +502,15 @@ make evals   # 49/49 cases: happy paths diffed exactly (including
              # member going stale while another verifies in the
              # same batch; and a lying bridge whose member
              # credits nothing until its own recorded exit
-             # closes it
+             # closes it — and audit exports: a completed
+             # task's trail exported and verified intact (the
+             # document never containing its own export entry),
+             # a batch's chain interleaving its members'
+             # trails in the order the work happened, a
+             # tampered copy — an entry edited, dropped, or a
+             # tail cut — failing verification at the first
+             # broken entry, and a deactivated operator
+             # refused the export, on the record
 ```
 
 ## Honest status

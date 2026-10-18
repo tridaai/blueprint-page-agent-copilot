@@ -236,6 +236,44 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   discrepancy cannot touch another's plan, confirmation, or
   execution, which the tests and evals prove by driving members
   of one batch to different fates on one store.
+- **Audit exports** (`exports.py`, `service.py`) — the trail,
+  made portable without becoming editable. An export takes one
+  scope's entries in the trail's true order — a task's own
+  trail; a batch's, meaning the batch scope's entries that name
+  the batch plus every member task's trail, interleaved by the
+  global audit read (append order in memory, the audit table's
+  row id in SQL — chronological by construction on both
+  backends, so the chain order is the order the work happened,
+  never a per-task concatenation); or a governance scope's
+  (`roles`, `templates`) — and chains them: each entry's
+  SHA-256 over the previous entry's hash and its own canonical
+  content (the stored fields only, keys sorted), under a
+  header naming the scope, the exporter, the export time (the
+  service's shared `_now()` stamp), the entry count, and the
+  final hash. `verify_export` re-walks a document and reports
+  intact, or the 1-based position of the first entry whose
+  content, link, or index fails; a truncated tail — every
+  present entry sound — is caught by the header's count and
+  final hash and named at the first missing entry. The JSON
+  document is the thing verified; the CSV rendering carries
+  the same entries and hashes for human readers. Exporting is
+  a recorded act behind the identity gate the other acts use:
+  the exporter must resolve to an enrolled, active directory
+  entry — an unknown name (`unknown_operator`) or a
+  deactivated one (`operator_inactive`) is refused, with the
+  refusal (`export_refused`) written into the exported scope's
+  trail before it raises. The document is built first and the
+  `audit_exported` entry (scope, count, final hash) written
+  after, so a document never contains its own export entry:
+  the chain covers the trail as it stood at export, and the
+  next export of the scope chains the earlier act in with the
+  rest. Verifying a document is a read, not an act — it writes
+  nothing, because checking evidence must not write on the
+  trail it checks. One route-table consequence, deliberate:
+  the batch export is the only batch write beside creation.
+  It decides nothing about any member — the round-8 proof
+  names it as the invariant's single exception and probes
+  that a member's state is untouched by it.
 - **State machine** (`service.py`) — DRAFT → PLANNED → CONFIRMED →
   VERIFIED / DISCREPANCY, with REFUSED as the plan-time terminal
   and DISCREPANCY_ACCEPTED as the deviation terminal (reached only
@@ -473,7 +511,13 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   on each member task, `batch_member` (the batch id, the
   member's position, and how it was submitted) — so a task's
   trail names the list it arrived in, and the batch's scope
-  names every task it stated.
+  names every task it stated. Audit exports add two, into
+  whichever scope was exported: `audit_exported` (the scope,
+  the entry count, and the final chain hash the document
+  carries — written after the document was built, so the
+  document itself never contains it) and `export_refused`
+  (the identity code: an exporter who is unknown to the
+  directory, or deactivated).
 
 ## The PageAgent API, as verified
 
@@ -537,6 +581,14 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   at the end of execution; asking for it again is a recorded
   refusal, not a recomputation — a verdict that could be re-run
   until it changed would not be evidence of anything.
+- **An exported trail cannot be quietly rewritten.** Every
+  entry in an export is chained to the one before it, and the
+  header carries the count and the final hash, so the four
+  quiet edits — change an entry, drop one, swap two, cut the
+  tail — each break the chain at a named position. The chain
+  proves the document is the trail as it stood at export; it
+  does not prove the trail itself was honest, which is what
+  the rest of this shell is for.
 - **Confirmation is a state, not a click.** The gate is checked in
   the service on every execution path, including step reports: a
   report against a task that was never armed for the live driver is
