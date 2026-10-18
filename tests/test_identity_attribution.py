@@ -271,6 +271,17 @@ def test_orphaned_work_surfaces_and_a_pickup_completes_it(service):
         confirmed.task_id}
 
 
+def test_orphaned_work_reads_in_creation_order(service):
+    # The orphaned read walks the task list, so it inherits the
+    # creation sequence's order: the work stranded longest is
+    # the work listed first.
+    first = service.intake(CREDIT, "j.okafor")
+    second = service.intake("mark order 1032 as shipped", "j.okafor")
+    service.deactivate_operator("s.hale", "j.okafor")
+    assert [o["task_id"] for o in service.orphaned_work()] == [
+        first.task_id, second.task_id]
+
+
 def test_pickup_refuses_work_that_is_not_orphaned(service):
     task = service.intake(CREDIT, "j.okafor")
     with pytest.raises(GateError) as caught:

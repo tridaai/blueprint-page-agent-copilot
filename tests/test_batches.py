@@ -204,10 +204,19 @@ def test_batch_creation_adds_no_permission(service):
 
 
 def test_batches_list_in_submission_order(service):
+    # Three batches, so the order cannot pass by luck: it is
+    # the creation sequence's order, not the timestamp's — all
+    # three can land inside the same second, where created_at
+    # ties and only the sequence separates them (the id is
+    # random and separates nothing).
     first = service.create_batch("op", [text_member(SHIP)])
     second = service.create_batch("op", [text_member(CREDIT)])
+    third = service.create_batch("op", [text_member(SHIP_FULL)])
     assert [b.batch_id for b in service.list_batches()] == [
-        first.batch_id, second.batch_id]
+        first.batch_id, second.batch_id, third.batch_id]
+    assert first.seq < second.seq < third.seq
+    assert [b.seq for b in service.list_batches()] == [
+        first.seq, second.seq, third.seq]
     assert service.get_batch("BATCH-NOPE") is None
 
 

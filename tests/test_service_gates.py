@@ -136,3 +136,20 @@ def test_sqlite_backed_service_round_trip(sqlite_service):
     task = plan_and_confirm(sqlite_service)
     task = sqlite_service.execute(task.task_id, "offline")
     assert task.status == TaskStatus.VERIFIED
+
+
+def test_tasks_list_in_creation_order(service):
+    # The task list reads in the order the work arrived: the
+    # creation sequence decides — never the random task id, and
+    # never the one-second created_at, inside which all three
+    # intakes can land. (On the SQL store profile the records
+    # themselves read back by id; the order is the service's.)
+    first = service.intake(CREDIT, "j.okafor")
+    second = service.intake("mark order 1032 as shipped", "j.okafor")
+    third = service.intake(CREDIT, "j.okafor")
+    listed = service.list_tasks()
+    assert [t.task_id for t in listed] == [
+        first.task_id, second.task_id, third.task_id]
+    assert first.seq < second.seq < third.seq
+    assert [t.seq for t in listed] == [
+        first.seq, second.seq, third.seq]
