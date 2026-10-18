@@ -28,6 +28,7 @@ from .models import (
     AmendIn,
     AuditExportIn,
     AssignRoleIn,
+    ClarifyIn,
     ConfirmIn,
     ConfirmReadbackIn,
     ConsoleSaveIn,
@@ -416,6 +417,17 @@ def create_app(settings: Optional[Settings] = None,
         plan = service.get_plan(task_id)
         return {"task": task.model_dump(mode="json"),
                 "plan": _plan_json(plan)}
+
+    @app.post("/api/tasks/{task_id}/clarify")
+    def clarify(task_id: str, body: ClarifyIn):
+        # Answer the task's pending clarification by picking one
+        # of its options (round 14). A recorded act on this one
+        # task — the batch route-table invariant is untouched —
+        # and a non-answer is refused (409) with the options
+        # restated in the error.
+        task = service.answer_clarification(
+            task_id, body.operator, body.choice)
+        return task.model_dump(mode="json")
 
     @app.post("/api/tasks/{task_id}/confirm")
     def confirm(task_id: str, body: ConfirmIn):

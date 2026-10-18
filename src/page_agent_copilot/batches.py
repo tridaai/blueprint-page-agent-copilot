@@ -179,6 +179,18 @@ def next_act_for(task: Task) -> dict:
                     "corrective; accepting the deviation is a "
                     "supervisor act"),
         }
+    if status == TaskStatus.AWAITING_CLARIFICATION:
+        pending = task.pending_clarification
+        question = (pending.question if pending
+                    else "a clarification question")
+        return {
+            "action": "clarify",
+            "detail": (f"answer the clarification: {question}"),
+            "who": ("a holder of a plan-capable role — the "
+                    "planner may answer their own clarification; "
+                    "confirmation, when a plan lands, is still a "
+                    "second person"),
+        }
     if status == TaskStatus.DRAFT:
         return {
             "action": "plan",

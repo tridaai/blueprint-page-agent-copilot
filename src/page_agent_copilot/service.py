@@ -174,6 +174,8 @@ from .exports import build_export, render_csv, verify_export
 from .models import (
     AmendChangeIn,
     AuditEntry,
+    Clarification,
+    ClarificationOption,
     CorrectionEntry,
     ExecutionAttempt,
     NavigationReportIn,
@@ -201,7 +203,7 @@ from .planner import (
     step_targets,
     summarize_steps,
 )
-from .policy import PlanRefusal
+from .policy import PlanAmbiguous, PlanRefusal
 from .reads import ConsoleReads
 from .spoken import normalize_transcript, spoken_hash, spoken_plan
 from .roles import (
@@ -255,11 +257,12 @@ def _template_content(template: TaskTemplate) -> dict:
 # The states in which a task still owes its operator an act —
 # planned and awaiting confirmation, confirmed and not yet
 # executed, stale and awaiting a re-plan, failed and awaiting a
-# recovery act. Work in one of these states whose operator has
-# been deactivated is orphaned work (see `orphaned_work`).
+# recovery act, and (round 14) awaiting a clarification answer.
+# Work in one of these states whose operator has been
+# deactivated is orphaned work (see `orphaned_work`).
 ORPHANED_STATUSES = (
     TaskStatus.PLANNED, TaskStatus.CONFIRMED, TaskStatus.STALE,
-    TaskStatus.EXECUTION_FAILED,
+    TaskStatus.EXECUTION_FAILED, TaskStatus.AWAITING_CLARIFICATION,
 )
 
 
@@ -879,6 +882,10 @@ class CopilotService:
                     render_pattern(template.pattern, example.slots),
                     scratch, self.settings.policy, "TASK-HEALTH")
                 detail = shape_detail(plan, example)
+            except PlanAmbiguous as amb:
+                detail = (f"the rendered text asks a clarification "
+                          f"({amb.code}: {amb.question}); a "
+                          f"template example must derive outright")
             except PlanRefusal as refusal:
                 detail = (f"the rendered text is refused: "
                           f"{refusal.code}: {refusal.message}")
@@ -936,25 +943,50 @@ class CopilotService:
                     "role_cannot_plan",
                     f"refused: role '{role.name}' may not plan work; "
                     f"planning is not among its action classes")
-            plan = derive_plan(text, self.store, self.settings.policy,
-                               task_id)
-            # And the derived plan must fit the role's allowlist —
-            # every page it works on, every field it touches.
-            problems = plan_problems(role, plan)
-            if problems:
-                first = problems[0]
-                raise PlanRefusal(
-                    first["problem"],
-                    f"refused: {describe_problem(role, first)}; "
-                    f"the plan exceeds the planner's role")
         except PlanRefusal as refusal:
-            task.status = TaskStatus.REFUSED
-            task.refusal_reason = f"{refusal.code}: {refusal.message}"
-            task.updated_at = _now()
-            self.store.put_task(task.model_dump(mode="json"))
-            self._audit(task_id, "policy", "plan_refused", {
-                "code": refusal.code, "reason": refusal.message})
-            return task
+            return self._refuse_plan(task, refusal)
+        return self._derive(task, {})
+
+    def _refuse_plan(self, task: Task, refusal: PlanRefusal) -> Task:
+        """Land a plan-time refusal on a task: REFUSED, the reason
+        on the record, the act on the trail. Shared by intake and
+        by derivation after a clarification answer — a refusal is
+        a refusal, whichever door derivation took to reach it."""
+        task.status = TaskStatus.REFUSED
+        task.refusal_reason = f"{refusal.code}: {refusal.message}"
+        task.updated_at = _now()
+        self.store.put_task(task.model_dump(mode="json"))
+        self._audit(task.task_id, "policy", "plan_refused", {
+            "code": refusal.code, "reason": refusal.message})
+        return task
+
+    def _derive(self, task: Task,
+                resolutions: dict[str, str]) -> Task:
+        """Derive the task's plan from the records as they stand,
+        with any recorded clarification answers pinned under their
+        keys. Three landings: a plan (PLANNED, stored, the
+        ordinary path — including the check that the plan fits
+        the planner's role allowlist, every page it works on and
+        every field it touches), a refusal (REFUSED, policy's
+        word), or a question (AWAITING_CLARIFICATION, landed by
+        `_ask_or_exhaust`)."""
+        try:
+            plan = derive_plan(task.text, self.store,
+                               self.settings.policy, task.task_id,
+                               resolutions)
+            role = self.role_of(task.planned_by or task.operator)
+            if role is not None:
+                problems = plan_problems(role, plan)
+                if problems:
+                    first = problems[0]
+                    raise PlanRefusal(
+                        first["problem"],
+                        f"refused: {describe_problem(role, first)}; "
+                        f"the plan exceeds the planner's role")
+        except PlanAmbiguous as amb:
+            return self._ask_or_exhaust(task, amb)
+        except PlanRefusal as refusal:
+            return self._refuse_plan(task, refusal)
         plan.created_at = _now()
         plan.preconditions = capture_preconditions(self.store, plan)
         self.store.put_plan(plan.model_dump(mode="json"))
@@ -962,10 +994,138 @@ class CopilotService:
         task.plan_version = plan.version
         task.updated_at = _now()
         self.store.put_task(task.model_dump(mode="json"))
-        self._audit(task_id, "planner", "plan_created", {
+        self._audit(task.task_id, "planner", "plan_created", {
             "plan_version": plan.version, "task_type": plan.task_type,
             "summary": plan.summary, "steps": len(plan.steps)})
         return task
+
+    def _ask_or_exhaust(self, task: Task, amb: PlanAmbiguous) -> Task:
+        """Land a derivation ambiguity on the task: park it in
+        AWAITING_CLARIFICATION carrying the question and its
+        options — unless the task has already spent its governed
+        patience (`Policy.max_clarifications` distinct questions),
+        in which case a further ambiguity refuses the task with
+        the history attached. Being asked again about a question
+        already asked — the records moved under a pinned answer,
+        so the choice must be re-made — spends no new patience."""
+        asked_keys = {c.key for c in task.clarifications}
+        if (amb.key not in asked_keys
+                and len(asked_keys)
+                >= self.settings.policy.max_clarifications):
+            history = [{
+                "key": c.key, "code": c.code,
+                "question": c.question, "answer": c.answer,
+                "answerer": c.answerer}
+                for c in task.clarifications]
+            trail = "; ".join(
+                f"{h['question']} -> {h['answer']}" for h in history)
+            reason = (
+                f"the task is still ambiguous after "
+                f"{len(asked_keys)} clarifications ({trail}) and "
+                f"one more choice remains ({amb.question}); the "
+                f"shell asks at most "
+                f"{self.settings.policy.max_clarifications} "
+                f"questions of one task "
+                f"(COPILOT_MAX_CLARIFICATIONS) and invents "
+                f"nothing — state the task with the remaining "
+                f"choices made")
+            task.status = TaskStatus.REFUSED
+            task.refusal_reason = (
+                f"clarification_exhausted: {reason}")
+            task.updated_at = _now()
+            self.store.put_task(task.model_dump(mode="json"))
+            self._audit(task.task_id, "policy", "plan_refused", {
+                "code": "clarification_exhausted", "reason": reason,
+                "clarifications": history})
+            return task
+        task.clarifications.append(Clarification(
+            key=amb.key, code=amb.code, question=amb.question,
+            options=[ClarificationOption(**o) for o in amb.options]))
+        task.status = TaskStatus.AWAITING_CLARIFICATION
+        task.updated_at = _now()
+        self.store.put_task(task.model_dump(mode="json"))
+        self._audit(task.task_id, "planner", "clarification_asked", {
+            "key": amb.key, "code": amb.code,
+            "question": amb.question,
+            "options": [dict(o) for o in amb.options]})
+        return task
+
+    def answer_clarification(self, task_id: str, operator: str,
+                             choice: str) -> Task:
+        """Answer the task's pending clarification by picking one
+        of its options — a recorded act under the planning role
+        rules: the answerer must be enrolled, active, and hold a
+        plan-capable role, the same checks intake runs, recorded
+        the way the confirmation gate records its refusals. The
+        planner MAY answer their own clarification: it is still
+        their task and no gate is being passed; confirmation
+        remains a second person, as always.
+
+        The choice must be one of the offered options' values.
+        Anything else — free text, a plausible-sounding phrase —
+        is refused with the options restated, and the task stays
+        where it was: the shell never interprets a reply into a
+        value. A taken answer is stored on the question, the act
+        is audited, and derivation re-runs with the choice
+        pinned: the task proceeds to PLANNED, asks one further
+        question, or refuses — the same three landings as
+        intake."""
+        task = self._require_task(task_id)
+        if task.status != TaskStatus.AWAITING_CLARIFICATION:
+            raise GateError(
+                f"task {task_id} is {task.status.value}; only a "
+                f"task awaiting clarification can be answered")
+        pending = task.pending_clarification
+        if pending is None:  # the state implies one; fail closed
+            raise GateError(
+                f"task {task_id} awaits clarification but carries "
+                f"no pending question")
+
+        def refused(code: str, reason: str) -> None:
+            self._audit(task_id, operator, "clarification_refused", {
+                "code": code, "reason": reason,
+                "key": pending.key, "question": pending.question})
+            raise GateError(
+                f"clarification of task {task_id} refused: {reason}")
+
+        entry = self.directory_entry(operator)
+        role = self.role_of(operator)
+        if entry is None or role is None:
+            refused(
+                "unknown_operator",
+                f"'{operator}' holds no role in the operator "
+                f"directory; an unknown operator may not answer a "
+                f"clarification")
+        if not self.entry_active(entry):
+            refused(
+                "operator_inactive",
+                f"'{operator}' is deactivated (operator_inactive); "
+                f"a deactivated operator may not answer a "
+                f"clarification")
+        if not role.can_plan:
+            refused(
+                "role_cannot_plan",
+                f"role '{role.name}' may not plan work; answering "
+                f"a clarification is part of planning the task, "
+                f"and planning is not among its action classes")
+        choice = (choice or "").strip()
+        if choice not in [o.value for o in pending.options]:
+            offered = "; ".join(
+                f"{o.value} ({o.label})" for o in pending.options)
+            refused(
+                "not_an_option",
+                f"'{choice}' is not one of the options. The "
+                f"question stands: {pending.question} The options "
+                f"are: {offered}. Pick one by its value — the "
+                f"shell does not interpret free text into a value")
+        pending.answer = choice
+        pending.answerer = operator
+        task.updated_at = _now()
+        self.store.put_task(task.model_dump(mode="json"))
+        self._audit(task_id, operator, "clarification_answered", {
+            "key": pending.key, "code": pending.code,
+            "question": pending.question, "answer": choice})
+        return self._derive(task, task.clarification_resolutions())
 
     def intake_transcript(self, text: str, operator: str) -> Task:
         """A task stated by voice, as transcribed (round 13):
@@ -1181,10 +1341,30 @@ class CopilotService:
                 f"task can be re-planned")
         previous = self.get_plan(task_id)
         assert previous is not None
+        # The answers the task already carries ride along: a
+        # clarified task that went stale is re-derived with its
+        # choices pinned, not asked about again. If the records
+        # as they now stand raise a question those answers no
+        # longer settle, the re-plan refuses — a re-plan is not
+        # an interactive door and cannot ask; the route onward
+        # is a fresh task, where the choice can be made.
+        refusal: Optional[PlanRefusal] = None
+        plan: Optional[Plan] = None
         try:
             plan = derive_plan(task.text, self.store,
-                               self.settings.policy, task_id)
-        except PlanRefusal as refusal:
+                               self.settings.policy, task_id,
+                               task.clarification_resolutions())
+        except PlanAmbiguous as amb:
+            refusal = PlanRefusal(
+                "clarification_needed",
+                f"refused: re-deriving from the records as they "
+                f"now stand raises a question a re-plan cannot "
+                f"ask ({amb.question}); the answers on the task "
+                f"no longer settle it — state the task afresh so "
+                f"the choice can be made")
+        except PlanRefusal as exc:
+            refusal = exc
+        if refusal is not None:
             task.status = TaskStatus.REFUSED
             task.refusal_reason = f"{refusal.code}: {refusal.message}"
             task.stale_records = []
@@ -1193,6 +1373,7 @@ class CopilotService:
                 "code": refusal.code, "reason": refusal.message,
                 "during": "replan"})
             return task
+        assert plan is not None
         plan.version = previous.version + 1
         plan.created_at = _now()
         plan.preconditions = capture_preconditions(self.store, plan)
