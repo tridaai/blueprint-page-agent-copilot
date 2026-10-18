@@ -201,6 +201,103 @@
         : "")).join("\n");
   }
 
+  // The task library, rendered from the same governed records
+  // the API serves: every version with its health folded in.
+  // Instantiating renders the pattern's text and states it as a
+  // task — the plan it comes back with is the planner's
+  // derivation, and a refusal is shown with the server's reason,
+  // like every other act in this console.
+  let libraryData = [];
+  function libraryKey(t) { return t.name + ":v" + t.version; }
+  function pickedTemplate() {
+    const pick = $("library-pick").value;
+    return libraryData.find((t) => libraryKey(t) === pick) || null;
+  }
+  function renderLibrarySlots() {
+    const box = $("library-slots");
+    box.innerHTML = "";
+    const t = pickedTemplate();
+    if (!t) return;
+    t.slots.forEach((s) => {
+      const row = document.createElement("div");
+      row.className = "field";
+      const label = document.createElement("label");
+      label.textContent = s.name + (s.kind === "record"
+        ? ` (${s.record_kind})` : ` (${s.kind})`);
+      row.appendChild(label);
+      const input = document.createElement("input");
+      input.type = "text";
+      input.id = "slot-" + s.name;
+      const example = t.examples[0];
+      if (example && example.slots[s.name] !== undefined)
+        input.value = example.slots[s.name];
+      row.appendChild(input);
+      box.appendChild(row);
+    });
+  }
+  async function refreshTemplates() {
+    libraryData = await api("/api/templates");
+    $("library-list").textContent = libraryData.map((t) =>
+      `${t.name} v${t.version}${t.current ? "" : " (superseded)"} — ` +
+      `${t.description} · health: ` +
+      (t.health.ok ? "OK — examples derive to their pinned shape"
+                   : "BROKEN — " + t.health.examples
+                       .filter((e) => !e.ok)
+                       .map((e) => e.detail).join("; ")) +
+      ` · pattern: ${t.pattern}`).join("\n");
+    const pick = $("library-pick");
+    const before = pick.value;
+    pick.innerHTML = libraryData.map((t) =>
+      `<option value="${libraryKey(t)}">${t.name} v${t.version}` +
+      `${t.current ? "" : " (superseded)"}</option>`).join("");
+    if (libraryData.some((t) => libraryKey(t) === before))
+      pick.value = before;
+    renderLibrarySlots();
+  }
+  $("library-pick").addEventListener("change", renderLibrarySlots);
+  $("library-create").addEventListener("click", async () => {
+    const t = pickedTemplate();
+    if (!t) return;
+    const slots = {};
+    t.slots.forEach((s) => { slots[s.name] = $("slot-" + s.name).value; });
+    const res = await fetch(
+      `/api/templates/${t.name}/instantiate`,
+      json("POST", { operator: asOperator(), version: t.version,
+                     slots }));
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("library-note").textContent =
+        "Refused: " + (body.detail || `-> ${res.status}`);
+      return;
+    }
+    $("library-note").textContent =
+      body.task.status === "REFUSED"
+        ? body.task.refusal_reason
+        : `Task stated from ${t.name} v${t.version}.`;
+    refreshTasks();
+    openTask(body.task.task_id);
+  });
+  $("pub-btn").addEventListener("click", async () => {
+    let slots, examples;
+    try {
+      slots = JSON.parse($("pub-slots").value || "[]");
+      examples = JSON.parse($("pub-examples").value || "[]");
+    } catch (err) {
+      $("pub-note").textContent = "Refused: slots and examples " +
+        "must be JSON (" + err.message + ")";
+      return;
+    }
+    const res = await fetch("/api/templates", json("POST", {
+      operator: asOperator(), name: $("pub-name").value,
+      pattern: $("pub-pattern").value,
+      description: $("pub-description").value, slots, examples }));
+    const body = await res.json().catch(() => ({}));
+    $("pub-note").textContent = res.ok
+      ? `Published ${body.name} v${body.version}.`
+      : "Refused: " + (body.detail || `-> ${res.status}`);
+    if (res.ok) await refreshTemplates();
+  });
+
   function showScreen(name) {
     document.querySelectorAll("nav button").forEach((b) =>
       b.classList.toggle("active", b.dataset.screen === name));
@@ -470,6 +567,12 @@
     // deactivated) offers the pickup act to a supervisor.
     const pickupDiv = $("task-pickup");
     pickupDiv.innerHTML = "";
+    if (task.template_name) {
+      pickupDiv.appendChild(document.createTextNode(
+        `Stated from the library template ${task.template_name} ` +
+        `v${task.template_version} — the plan below is the ` +
+        `planner's derivation from its rendered text. `));
+    }
     if (task.planned_by && task.planned_by !== task.operator) {
       pickupDiv.appendChild(document.createTextNode(
         `Planned by ${task.planned_by}; the task now belongs to ` +
@@ -682,7 +785,7 @@
     await Promise.all([refreshOrders(), refreshCustomers(),
                        refreshInvoices(), refreshTasks(),
                        refreshRoles(), refreshOrphaned(),
-                       refreshReport()]);
+                       refreshReport(), refreshTemplates()]);
   }
   refreshAll();
 

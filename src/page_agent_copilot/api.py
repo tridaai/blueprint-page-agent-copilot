@@ -48,6 +48,11 @@ from .records import apply_field_change, create_credit_memo
 from .roles import RoleError
 from .service import CopilotService, GateError
 from .store import Store, build_store
+from .templates import (
+    TemplateError,
+    TemplateInstantiateIn,
+    TemplatePublishIn,
+)
 
 log = logging.getLogger("page_agent_copilot.api")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -94,6 +99,14 @@ def create_app(settings: Optional[Settings] = None,
     async def role_error(_: Request, exc: RoleError):
         # A role definition that does not validate (or names no
         # role): refused whole, nothing stored.
+        return JSONResponse(status_code=422, content={
+            "detail": exc.message, "code": exc.code})
+
+    @app.exception_handler(TemplateError)
+    async def template_error(_: Request, exc: TemplateError):
+        # A template that does not validate, or slot values that
+        # do not fit it: refused whole, nothing stored, nothing
+        # instantiated.
         return JSONResponse(status_code=422, content={
             "detail": exc.message, "code": exc.code})
 
@@ -449,6 +462,53 @@ def create_app(settings: Optional[Settings] = None,
         # every act's actor must resolve to a directory name or
         # a named system component. Zero problems is the grade.
         return service.attribution_check()
+
+    # -- the task library ---------------------------------------------
+    # Templates are governed records: listed and read here with
+    # their health folded in (computed on read from the pinned
+    # examples), published in new versions only as recorded
+    # supervisor acts, and instantiated by name and version.
+    # Instantiation renders the pattern's text and states it as a
+    # task through the ordinary intake — the plan the response
+    # carries is the planner's derivation from that text, never
+    # the template's own word.
+    @app.get("/api/templates")
+    def templates():
+        return service.list_template_views()
+
+    @app.get("/api/templates/{name}")
+    def template(name: str):
+        found = service.get_template(name)
+        if found is None:
+            raise KeyError(f"template {name} does not exist")
+        return service.template_view(found)
+
+    @app.get("/api/templates/{name}/versions/{version}")
+    def template_version(name: str, version: int):
+        found = service.get_template(name, version)
+        if found is None:
+            raise KeyError(
+                f"template {name} v{version} does not exist")
+        return service.template_view(found)
+
+    @app.post("/api/templates", status_code=201)
+    def publish_template(body: TemplatePublishIn):
+        template = service.publish_template(
+            body.operator,
+            body.model_dump(mode="json", exclude={"operator"}))
+        return template.model_dump(mode="json")
+
+    @app.post("/api/templates/{name}/instantiate", status_code=201)
+    def instantiate_template(name: str, body: TemplateInstantiateIn):
+        task = service.instantiate_template(
+            name, body.version, body.slots, body.operator)
+        plan = service.get_plan(task.task_id)
+        return {"task": task.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json") if plan else None}
+
+    @app.get("/api/templates-audit")
+    def templates_audit():
+        return service.template_audit()
 
     @app.post("/api/tasks/{task_id}/steps/{seq}/report")
     def report_step(task_id: str, seq: int, body: StepReportIn):

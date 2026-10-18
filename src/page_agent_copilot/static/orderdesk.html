@@ -143,6 +143,35 @@
       <table id="tasks-table"><thead><tr><th>Task</th><th>Text</th><th>Status</th><th>Operator</th><th>Driver</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel">
+      <h3>Task library</h3>
+      <p class="note">The recurring jobs, kept as governed templates: a pattern with named slots,
+        a note on when to use it, and a version. Instantiating one fills its slots and states the
+        rendered text as an ordinary task — the planner derives the plan from that text, so a
+        template never carries a plan of its own past the planner. Every version pins examples;
+        a version whose examples no longer derive to their pinned shape is marked BROKEN here,
+        by name and version. Publishing a new version is a supervisor act, recorded; old versions
+        stay instantiable by name and version.</p>
+      <div id="library-list" class="diff"></div>
+      <div class="field" style="margin-top:10px;"><label for="library-pick">Template</label>
+        <select id="library-pick"></select></div>
+      <div id="library-slots"></div>
+      <button class="act" id="library-create">Create task from template</button>
+      <span class="note" id="library-note"></span>
+      <h3 style="margin-top:16px;">Publish a new version (supervisor)</h3>
+      <div class="field"><label for="pub-name">Name</label>
+        <input id="pub-name" type="text" placeholder="e.g. order-status"></div>
+      <div class="field"><label for="pub-pattern">Pattern</label>
+        <input id="pub-pattern" type="text" placeholder="mark order {order} as {status}"></div>
+      <div class="field"><label for="pub-description">When to use it</label>
+        <input id="pub-description" type="text"></div>
+      <div class="field"><label for="pub-slots">Slots (JSON)</label>
+        <textarea id="pub-slots" placeholder='[{"name": "order", "kind": "record", "record_kind": "orders"}, {"name": "status", "kind": "text"}]'></textarea></div>
+      <div class="field"><label for="pub-examples">Pinned examples (JSON)</label>
+        <textarea id="pub-examples" placeholder='[{"slots": {"order": "1036", "status": "packed"}, "task_type": "order_status", "steps": [{"action": "set", "record_kind": "orders", "record_id": "1036", "field": "status", "value": "packed"}]}]'></textarea></div>
+      <button class="act secondary" id="pub-btn">Publish new version</button>
+      <span class="note" id="pub-note"></span>
+    </div>
+    <div class="panel">
       <h3>Roles</h3>
       <p class="note">Who may do what is governed data, enforced by the shell at plan time, at
         confirmation, and again at execution. A plan is confirmed by a second person — never its
