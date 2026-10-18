@@ -757,6 +757,14 @@
       `executions: ${d.executions.attempts_run} attempts, ` +
         `${d.executions.steps_consumed} steps consumed`,
       `bridge protocol refusals: ${d.protocol_refusals}`,
+      `dual control: ` +
+        `${(d.dual_control?.required || []).length} plan(s) ` +
+        `under dual control, ` +
+        `${(d.dual_control?.awaiting_second_confirmer || []).length}` +
+        ` awaiting a second confirmer` +
+        ((d.dual_control?.awaiting_second_confirmer || []).length
+          ? ` (${d.dual_control.awaiting_second_confirmer.join(", ")})`
+          : ""),
     ].join("\n");
   }
 
@@ -891,6 +899,24 @@
     $("task-refusal").textContent =
       task.status === "REFUSED" ? task.refusal_reason : "";
     renderClarification(task);
+    // Dual control (round 18): a plan whose stakes reach the
+    // governed threshold is confirmed by two distinct people.
+    // The badge names the standing exactly — who has confirmed,
+    // and whether a second, different confirmer is still owed.
+    const dual = detail.dual_control || {};
+    $("task-dual").textContent = !dual.required ? ""
+      : dual.awaiting_second_confirmer
+        ? `Dual control (${dual.reasons.join(" + ")}): ` +
+          `${dual.confirmers[0]} has confirmed plan ` +
+          `v${task.plan_version} — awaiting a second confirmer: ` +
+          `a different confirm-capable operator, not the planner ` +
+          `and not ${dual.confirmers[0]}.`
+        : task.status === "PLANNED"
+          ? `Dual control (${dual.reasons.join(" + ")}): this ` +
+            `plan needs two distinct confirmers before it can ` +
+            `execute.`
+          : `Dual control (${dual.reasons.join(" + ")}): ` +
+            `confirmed by ${(dual.confirmers || []).join(" and ")}.`;
     $("task-stale").textContent = task.status === "STALE"
       ? "Stale — these records changed after the plan was derived: " +
         (task.stale_records || []).join(", ") +

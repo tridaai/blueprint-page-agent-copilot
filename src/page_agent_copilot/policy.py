@@ -15,6 +15,11 @@ approve it. The three R1 rules:
 
 Plus the allowlist discipline: only governed fields may be planned,
 and status fields only take governed values.
+
+Round 18 adds the gate's stakes rule at the foot of this module
+(`dual_control_assessment`): not a refusal — a plan whose total
+credit reaches the governed threshold, or that touches a
+high-stakes field, is confirmed by two distinct people, not one.
 """
 
 from __future__ import annotations
@@ -27,6 +32,8 @@ from .models import (
     ORDER_STATUSES,
     PAYMENT_FIELDS,
     PLANNABLE_FIELDS,
+    Plan,
+    StepAction,
 )
 
 
@@ -95,6 +102,74 @@ def check_field_change(kind: str, field: str, value: str) -> None:
             raise PlanRefusal(
                 "value_not_governed",
                 f"refused: credit limit '{value}' is not a number")
+
+
+# ------------------------------------------------------- dual control
+# Round 18. The rules above refuse plans; this one scales the
+# gate. A plan is under dual control when its stakes reach the
+# governed threshold — measured two ways, either sufficient:
+#
+# * **Amount.** The plan's total credited amount (every credit
+#   memo it creates, summed) reaches `Policy.dual_control_cap`,
+#   which defaults to the credit cap itself.
+# * **Field.** The plan sets a high-stakes field — one whose
+#   change EXTENDS money rather than recording work. That set is
+#   exactly one field today: a customer's `credit_limit`, the
+#   ceiling on what the business will let that customer owe. It
+#   is already the supervisor-only field in the role model (an
+#   operator may not even plan it); every other plannable field
+#   records operational state (a status, a date, a carrier, a
+#   contact detail) and stays single-confirmation work.
+#
+# Under dual control the confirmation gate needs TWO seats: two
+# distinct confirm-capable operators, neither of them the
+# planner, each confirming the same plan version. The assessment
+# is computed from the plan at confirmation time and on every
+# read that shows it — never stored on the plan, so it cannot
+# drift from the steps it judges.
+
+DUAL_CONTROL_FIELDS: dict[str, frozenset[str]] = {
+    "customers": frozenset({"credit_limit"}),
+}
+
+
+def dual_control_assessment(plan: Plan, policy: Policy) -> dict:
+    """Judge one plan's stakes: does confirming it take two
+    people? Returns the derived fact every surface shows —
+    `required`, the `reasons` (any of "amount", "field"),
+    the plan's `total_credited`, the `high_stakes_fields` it
+    touches (as "kind.field"), and the `threshold` in force.
+    Pure: the same plan under the same policy always judges
+    the same, whoever asks."""
+    total = Decimal("0.00")
+    fields: list[str] = []
+    for step in plan.steps:
+        if step.action == StepAction.CREATE \
+                and step.record_kind == "credit_memos":
+            raw = step.fields.get("amount")
+            if raw:
+                try:
+                    total += Decimal(raw)
+                except InvalidOperation:
+                    pass  # an unplannable amount never got here
+        if step.action == StepAction.SET and step.field is not None:
+            if step.field in DUAL_CONTROL_FIELDS.get(
+                    step.record_kind, frozenset()):
+                label = f"{step.record_kind}.{step.field}"
+                if label not in fields:
+                    fields.append(label)
+    reasons: list[str] = []
+    if total >= policy.dual_control_cap:
+        reasons.append("amount")
+    if fields:
+        reasons.append("field")
+    return {
+        "required": bool(reasons),
+        "reasons": reasons,
+        "total_credited": str(total),
+        "high_stakes_fields": fields,
+        "threshold": str(policy.dual_control_cap),
+    }
 
 
 def check_credit(amount: Decimal, policy: Policy) -> None:

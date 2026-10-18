@@ -393,10 +393,16 @@ def _():
            and "operator" in (task.refusal_reason or ""),
            "the refusal does not name the field and the role")
     # The same task is a supervisor's to plan, and it verifies.
+    # Round 18: credit_limit is a high-stakes field, so the plan
+    # stands under dual control — two distinct confirmers (the
+    # second operator enrolled here by the supervisor) before
+    # it may execute.
     task = svc.intake("update customer 2041 credit limit to 30000",
                       "s.hale")
     expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+    svc.enroll_operator("s.hale", "r.osei", "operator")
     svc.confirm(task.task_id, "op")
+    svc.confirm(task.task_id, "r.osei")
     task = svc.execute(task.task_id, "offline")
     expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
     cust = svc.store.get_record("customers", "2041")

@@ -182,6 +182,7 @@ from .models import (
     PageNavigation,
     Plan,
     PlanChange,
+    PlanConfirmation,
     PlanDiff,
     PlanStep,
     StepAction,
@@ -208,7 +209,7 @@ from .planner import (
     step_targets,
     summarize_steps,
 )
-from .policy import PlanAmbiguous, PlanRefusal
+from .policy import PlanAmbiguous, PlanRefusal, dual_control_assessment
 from .reads import ConsoleReads
 from .spoken import normalize_transcript, spoken_hash, spoken_plan
 from .roles import (
@@ -1351,11 +1352,20 @@ class CopilotService:
         amended.superseded = False
         amended.preconditions = capture_preconditions(
             self.store, amended)
+        # Dual control (round 18): the seats standing on the old
+        # version bound THAT version's words. The amendment's
+        # version starts with none — a plan that had one of its
+        # two confirmations owes both again. The seats are not
+        # lost to history: each is a `plan_confirmed` entry in
+        # the trail, and the reset count rides this entry.
+        seats_reset = len(task.confirmations_for(current.version))
+        task.confirmations = []
         self._store_plan_version(task, amended)
         self._save(task)
         self._audit(task_id, operator, "plan_amended", {
             "from_version": current.version,
             "to_version": amended.version,
+            "confirmations_reset": seats_reset,
             "changes": [c.model_dump(mode="json") for c in recorded]})
         return task, amended, recorded
 
@@ -1442,6 +1452,7 @@ class CopilotService:
         task.status = TaskStatus.PLANNED
         task.confirmed_by = None
         task.confirmed_version = None
+        task.confirmations = []
         task.stale_records = []
         self._save(task)
         self._audit(task_id, operator, "plan_replanned", {
@@ -1507,25 +1518,84 @@ class CopilotService:
                 f"confirmation of task {task.task_id} refused: "
                 f"'{operator}' planned this task; a plan is "
                 f"confirmed by a second person, never its planner")
+        # Dual control (round 18): a seat already taken on this
+        # plan version cannot be taken again by the same person —
+        # the second seat exists to be a SECOND pair of eyes, so
+        # a repeat confirmation from the first confirmer (under
+        # any spacing or casing of the name) fills nothing.
+        for seat in task.confirmations_for(task.plan_version):
+            if operator_named(seat.operator) == operator_named(
+                    operator):
+                self._audit(task.task_id, operator,
+                            "confirmation_refused", {
+                                "code": "already_confirmed",
+                                "reason": f"'{seat.operator}' has "
+                                          f"already confirmed "
+                                          f"plan "
+                                          f"v{task.plan_version}; "
+                                          f"dual control needs a "
+                                          f"second, different "
+                                          f"confirmer",
+                                "planner": task.operator,
+                                "plan_version": task.plan_version})
+                raise GateError(
+                    f"confirmation of task {task.task_id} refused: "
+                    f"'{operator}' has already confirmed plan "
+                    f"v{task.plan_version} (already_confirmed); "
+                    f"dual control needs a second, different "
+                    f"confirmer")
 
     def _finalize_confirmation(self, task: Task, operator: str,
                                extra: Optional[dict] = None) -> Task:
-        """Land a confirmation that has passed every check: the
-        state moves, and the confirmation binds this exact plan
-        version — execution loads it by number, so nothing that
-        happens to the plan store afterwards can widen what the
-        human approved. `extra` carries the read-back path's
-        binding (its method, the spoken hash, the token) into
-        the same `plan_confirmed` entry, so the trail shows how
-        the plan was confirmed, not only that it was."""
-        task.status = TaskStatus.CONFIRMED
-        task.confirmed_by = operator
-        task.confirmed_version = task.plan_version
-        self._save(task)
-        detail = {"plan_version": task.plan_version,
-                  "confirmed_version": task.confirmed_version}
+        """Land a confirmation that has passed every check, as a
+        SEAT on the current plan version (round 18). The seat is
+        recorded on the task and in the trail (`plan_confirmed`,
+        naming the seat, the seats the gate requires, and
+        whether the gate completed); the gate completes — the
+        state moves to CONFIRMED and the confirmation binds this
+        exact plan version — when the seats standing on the
+        version reach the number the plan's stakes require: one
+        for an ordinary plan, two distinct confirmers for a plan
+        under dual control (see `policy.dual_control_assessment`).
+        Until then the task stands PLANNED with its seat filled,
+        and execution refuses, naming the second confirmer it is
+        owed. Execution loads the bound version by number, so
+        nothing that happens to the plan store afterwards can
+        widen what the humans approved. `extra` carries the
+        read-back path's binding (its method, the spoken hash,
+        the token) into the same `plan_confirmed` entry, so the
+        trail shows how the plan was confirmed, not only that
+        it was."""
+        plan = self.get_plan(task.task_id)
+        assessment = (dual_control_assessment(
+            plan, self.settings.policy) if plan is not None else {
+                "required": False, "reasons": []})
+        seats_required = 2 if assessment["required"] else 1
+        method = (extra or {}).get("method", "confirm")
+        task.confirmations = [
+            seat for seat in task.confirmations
+            if seat.plan_version == task.plan_version]
+        task.confirmations.append(PlanConfirmation(
+            operator=operator, method=method,
+            plan_version=task.plan_version or 0, at=_now()))
+        seats = task.confirmations_for(task.plan_version)
+        detail: dict = {
+            "plan_version": task.plan_version,
+            "seat": len(seats),
+            "seats_required": seats_required,
+            "dual_control": assessment["required"],
+            "complete": len(seats) >= seats_required}
         if extra:
             detail.update(extra)
+        if len(seats) >= seats_required:
+            task.status = TaskStatus.CONFIRMED
+            task.confirmed_by = operator
+            task.confirmed_version = task.plan_version
+            detail["confirmed_version"] = task.confirmed_version
+        else:
+            detail["awaiting"] = "second_confirmer"
+            detail["dual_control_reasons"] = assessment["reasons"]
+        self._save(task)
         self._audit(task.task_id, operator, "plan_confirmed", detail)
         return task
 
@@ -1533,6 +1603,47 @@ class CopilotService:
         task = self._require_task(task_id)
         self._check_confirmer(task, operator)
         return self._finalize_confirmation(task, operator)
+
+    def dual_control_view(self, task: Task) -> dict:
+        """The dual-control fact for one task, as its reads show
+        it: whether the plan the task stands on needs two
+        confirmers and why (`policy.dual_control_assessment`,
+        computed from the plan — the bound plan once confirmed,
+        else the current one), the seats the gate requires and
+        the seats standing on that plan's version, who holds
+        them, and whether a second confirmer is still owed.
+        Derived on every read from the plan and the task's seat
+        records — never stored — so the view cannot disagree
+        with the gate that will judge the next confirmation."""
+        plan: Optional[Plan] = None
+        if task.plan_version is not None:
+            version = (task.confirmed_version
+                       if task.status != TaskStatus.PLANNED
+                       and task.confirmed_version is not None
+                       else task.plan_version)
+            plan = self.get_plan(task.task_id, version)
+        if plan is None:
+            return {"required": False, "reasons": [],
+                    "total_credited": "0.00",
+                    "high_stakes_fields": [],
+                    "threshold": str(
+                        self.settings.policy.dual_control_cap),
+                    "seats_required": 1, "seats_filled": 0,
+                    "confirmers": [],
+                    "awaiting_second_confirmer": False}
+        assessment = dual_control_assessment(
+            plan, self.settings.policy)
+        seats = task.confirmations_for(plan.version)
+        required = assessment["required"]
+        return {
+            **assessment,
+            "seats_required": 2 if required else 1,
+            "seats_filled": len(seats),
+            "confirmers": [seat.operator for seat in seats],
+            "awaiting_second_confirmer": bool(
+                required and task.status == TaskStatus.PLANNED
+                and len(seats) == 1),
+        }
 
     # -- accessibility: the spoken form and read-back confirmation -------
     # Round 13. The spoken form is a view of the stored plan
@@ -2096,6 +2207,24 @@ class CopilotService:
                 fail: Optional[dict[int, str]] = None,
                 operator: Optional[str] = None) -> Task:
         task = self._require_task(task_id)
+        if task.status == TaskStatus.PLANNED:
+            # Dual control (round 18): a plan whose stakes put it
+            # under dual control stands PLANNED with its first
+            # seat filled until a second, different confirmer
+            # lands — say exactly that, rather than the bare
+            # "unconfirmed" the generic refusal below would give.
+            seats = task.confirmations_for(task.plan_version)
+            current = self.get_plan(task_id)
+            if seats and current is not None \
+                    and dual_control_assessment(
+                        current, self.settings.policy)["required"]:
+                raise GateError(
+                    f"execution of task {task_id} refused: plan "
+                    f"v{task.plan_version} is under dual control "
+                    f"and stands at one of two confirmations "
+                    f"({seats[0].operator}); a second, different "
+                    f"confirmer must confirm it before it can "
+                    f"execute")
         if task.status != TaskStatus.CONFIRMED:
             raise GateError(
                 f"task {task_id} is {task.status.value}; execution "
@@ -3203,9 +3332,12 @@ class CopilotService:
     def task_view(self, task: Task) -> dict:
         """A task as the API's list reads serve it: the record,
         plus its ending — derived on every read, never stored,
-        so the label cannot disagree with the records."""
+        so the label cannot disagree with the records — and its
+        dual-control standing (round 18), derived the same way
+        from the plan and the seats standing on it."""
         view = task.model_dump(mode="json")
         view["ending"] = self.task_ending(task)
+        view["dual_control"] = self.dual_control_view(task)
         return view
 
     def task_trace(self, task_id: str) -> dict:
@@ -3262,7 +3394,8 @@ class CopilotService:
              for t in tasks},
             {t.task_id: self._stored_verification(t.task_id)
              for t in tasks},
-            {t.task_id: self.audit(t.task_id) for t in tasks})
+            {t.task_id: self.audit(t.task_id) for t in tasks},
+            {t.task_id: self.dual_control_view(t) for t in tasks})
         previous = self.store.get_record("digests", day)
         record = {
             "id": day, **payload,
@@ -3461,7 +3594,8 @@ class CopilotService:
             "refusal_reason": task.refusal_reason,
             "failed_step": task.failed_step,
             "failure_error": task.failure_error,
-            "next_act": next_act_for(task),
+            "next_act": next_act_for(
+                task, dual=self.dual_control_view(task)),
         })
         return row
 

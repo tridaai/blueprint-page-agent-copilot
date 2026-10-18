@@ -287,12 +287,17 @@ def fold_digest(day: str, tasks: list[Task],
                 attempts_by_task: dict[str, list[ExecutionAttempt]],
                 reports_by_task: dict[
                     str, Optional[VerificationReport]],
-                audits_by_task: dict[str, list[dict]]) -> dict:
+                audits_by_task: dict[str, list[dict]],
+                dual_by_task: Optional[dict[str, dict]] = None
+                ) -> dict:
     """One day's fold. The caller scopes `tasks` to the day
     (the tasks created on it, in the service's reading) and
     supplies each task's attempts, stored verification report,
-    and audit trail; everything below is counted from those
-    records and nothing else.
+    audit trail, and dual-control standing (round 18 — the
+    assessment is computed from the plan, which the fold does
+    not hold, so the caller passes the derived view in, the way
+    it passes the attempts); everything below is counted from
+    those records and nothing else.
 
     The credited total follows the batch report's rule exactly:
     summed from the VERIFIED tasks' stored verification
@@ -368,4 +373,17 @@ def fold_digest(day: str, tasks: list[Task],
             1 for t in tasks
             for e in audits_by_task.get(t.task_id, [])
             if e.get("event") in PROTOCOL_REFUSAL_EVENTS),
+        # Dual control (round 18): the day's plans that stand
+        # under dual control, and of those the ones still
+        # awaiting their second confirmer — folded from the
+        # caller's per-task views, never from a stored counter.
+        "dual_control": {
+            "required": [t.task_id for t in tasks
+                         if (dual_by_task or {}).get(
+                             t.task_id, {}).get("required")],
+            "awaiting_second_confirmer": [
+                t.task_id for t in tasks
+                if (dual_by_task or {}).get(
+                    t.task_id, {}).get(
+                        "awaiting_second_confirmer")]},
     }

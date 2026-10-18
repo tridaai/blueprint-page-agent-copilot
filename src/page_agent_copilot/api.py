@@ -19,7 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from .batches import BatchCreateIn, BatchError
-from .config import Settings
+from .config import Policy, Settings
 from .logging_setup import new_request_id, setup_logging
 from .models import (
     PAYMENT_FIELDS,
@@ -52,7 +52,7 @@ from .models import (
     TranscriptIntakeIn,
     VerifyIn,
 )
-from .policy import PlanRefusal
+from .policy import PlanRefusal, dual_control_assessment
 from .reads import ConsoleReads
 from .records import apply_field_change, create_credit_memo
 from .roles import PAGE_CATALOGUE, RoleError
@@ -68,17 +68,27 @@ log = logging.getLogger("page_agent_copilot.api")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-def _plan_json(plan: Optional[Plan]) -> Optional[dict]:
+def _plan_json(plan: Optional[Plan],
+               policy: Optional[Policy] = None) -> Optional[dict]:
     """A plan as the API serves it: the stored fields, plus the
     page span derived from the steps (round 12) — the pages the
     plan works on, in the order it reaches them, and whether it is
-    a multi-page flow. Derived on every serve, never stored, so
-    the served span is always the steps' own span."""
+    a multi-page flow — and, when the caller passes the Policy,
+    the plan's dual-control assessment (round 18): whether
+    confirming it takes two distinct people, and why. Derived on
+    every serve, never stored, so the served facts are always the
+    steps' own facts."""
     if plan is None:
         return None
     data = plan.model_dump(mode="json")
     data["pages"] = plan.pages
     data["multi_page"] = plan.is_multi_page
+    if policy is not None:
+        assessment = dual_control_assessment(plan, policy)
+        data["dual_control_required"] = assessment["required"]
+        data["dual_control_reasons"] = assessment["reasons"]
+        data["dual_control_total_credited"] = \
+            assessment["total_credited"]
     return data
 
 
@@ -273,7 +283,8 @@ def create_app(settings: Optional[Settings] = None,
     def intake(body: TaskIntake):
         task = service.intake(body.text, body.operator)
         return {"task": task.model_dump(mode="json"),
-                "plan": (_plan_json(service.get_plan(task.task_id))
+                "plan": (_plan_json(service.get_plan(task.task_id),
+                         settings.policy)
                          if task.plan_version else None)}
 
     @app.post("/api/tasks/transcript", status_code=201)
@@ -285,7 +296,8 @@ def create_app(settings: Optional[Settings] = None,
         # trail.
         task = service.intake_transcript(body.text, body.operator)
         return {"task": task.model_dump(mode="json"),
-                "plan": (_plan_json(service.get_plan(task.task_id))
+                "plan": (_plan_json(service.get_plan(task.task_id),
+                         settings.policy)
                          if task.plan_version else None)}
 
     @app.get("/api/tasks")
@@ -304,7 +316,8 @@ def create_app(settings: Optional[Settings] = None,
         report = service.get_verification(task_id)
         detail = {"task": task.model_dump(mode="json"),
                   "ending": service.task_ending(task),
-                  "plan": _plan_json(plan),
+                  "dual_control": service.dual_control_view(task),
+                  "plan": _plan_json(plan, settings.policy),
                   "plan_versions": [p.version
                                     for p in service.list_plans(task_id)],
                   "attempts": [a.model_dump(mode="json")
@@ -381,7 +394,7 @@ def create_app(settings: Optional[Settings] = None,
         child = service.spawn_corrective(task_id, body.operator)
         plan = service.get_plan(child.task_id)
         return {"task": child.model_dump(mode="json"),
-                "plan": _plan_json(plan)}
+                "plan": _plan_json(plan, settings.policy)}
 
     @app.post("/api/tasks/{task_id}/accept-deviation")
     def accept_deviation(task_id: str, body: AcceptDeviationIn):
@@ -397,7 +410,7 @@ def create_app(settings: Optional[Settings] = None,
     def plans(task_id: str):
         if service.get_task(task_id) is None:
             raise KeyError(f"task {task_id} does not exist")
-        return [_plan_json(p)
+        return [_plan_json(p, settings.policy)
                 for p in service.list_plans(task_id)]
 
     @app.get("/api/tasks/{task_id}/plans/{version}")
@@ -406,7 +419,7 @@ def create_app(settings: Optional[Settings] = None,
         if plan is None:
             raise KeyError(
                 f"task {task_id} has no plan version {version}")
-        return _plan_json(plan)
+        return _plan_json(plan, settings.policy)
 
     @app.get("/api/tasks/{task_id}/plan-diff")
     def plan_diff(task_id: str, from_version: int, to_version: int):
@@ -423,7 +436,7 @@ def create_app(settings: Optional[Settings] = None,
         task, plan, changes = service.amend(
             task_id, body.operator, body.changes)
         return {"task": task.model_dump(mode="json"),
-                "plan": _plan_json(plan),
+                "plan": _plan_json(plan, settings.policy),
                 "changes": [c.model_dump(mode="json") for c in changes]}
 
     @app.post("/api/tasks/{task_id}/reject")
@@ -436,7 +449,7 @@ def create_app(settings: Optional[Settings] = None,
         task = service.replan(task_id, body.operator)
         plan = service.get_plan(task_id)
         return {"task": task.model_dump(mode="json"),
-                "plan": _plan_json(plan)}
+                "plan": _plan_json(plan, settings.policy)}
 
     @app.post("/api/tasks/{task_id}/clarify")
     def clarify(task_id: str, body: ClarifyIn):
@@ -725,7 +738,7 @@ def create_app(settings: Optional[Settings] = None,
             name, body.version, body.slots, body.operator)
         plan = service.get_plan(task.task_id)
         return {"task": task.model_dump(mode="json"),
-                "plan": _plan_json(plan)}
+                "plan": _plan_json(plan, settings.policy)}
 
     @app.get("/api/templates-audit")
     def templates_audit():

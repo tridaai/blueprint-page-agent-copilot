@@ -219,6 +219,29 @@ class Clarification(BaseModel):
     answerer: Optional[str] = None
 
 
+class PlanConfirmation(BaseModel):
+    """One confirmer's seat on one plan version (round 18).
+
+    A confirmation has always bound an exact plan version; dual
+    control makes the seats themselves records: who confirmed,
+    by which method (`confirm`, or `readback` — the round-13
+    token path fills a seat exactly like the plain one), the
+    plan version the seat binds, and when. A plan under dual
+    control needs two seats from two distinct operators, neither
+    of them the planner, before the gate completes; an ordinary
+    plan needs one, as it always has. Seats are counted per
+    version — an amendment supersedes the version the seats
+    bound, and the service clears the list when it lands, so a
+    seat can never be spent on a version its confirmer did not
+    see. The seats' history is never lost: every seat is also a
+    `plan_confirmed` entry in the audit trail."""
+
+    operator: str
+    method: str = "confirm"  # "confirm" | "readback"
+    plan_version: int
+    at: str = ""
+
+
 class Task(BaseModel):
     task_id: str
     text: str
@@ -236,6 +259,18 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.DRAFT
     plan_version: Optional[int] = None
     confirmed_by: Optional[str] = None
+    # The confirmation seats standing on the current plan
+    # version (round 18): one entry per confirmer who has
+    # confirmed it, in the order they confirmed. An ordinary
+    # plan completes its gate with the first seat; a plan under
+    # dual control (see policy.dual_control_assessment) stands
+    # PLANNED with one seat filled until a second, different
+    # confirmer fills the other. The list is cleared whenever a
+    # new plan version lands (an amendment, a re-plan) —
+    # confirmations bind versions, never tasks in the abstract.
+    # Tasks stored before dual control carry an empty list;
+    # their `confirmed_by` is the seat of record, as before.
+    confirmations: list[PlanConfirmation] = Field(default_factory=list)
     # The exact plan version the confirmation binds. Execution runs
     # this version — never "the latest" — so a confirmation of v1
     # can never execute a v2 that did not exist when the human said
@@ -302,6 +337,17 @@ class Task(BaseModel):
     seq: int = 0
     created_at: str = ""
     updated_at: str = ""
+
+    def confirmations_for(self, version: Optional[int]
+                          ) -> list[PlanConfirmation]:
+        """The confirmation seats standing on one plan version:
+        the only seats the gate counts. (The service also clears
+        the list when a new version lands; counting by version
+        is the second lock on the same door, so a seat recorded
+        against a superseded version can never complete a gate
+        it was not given to.)"""
+        return [c for c in self.confirmations
+                if c.plan_version == version]
 
     @property
     def pending_clarification(self) -> Optional[Clarification]:

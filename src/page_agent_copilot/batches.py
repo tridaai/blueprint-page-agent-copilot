@@ -124,19 +124,47 @@ class Batch(BaseModel):
         return self.batch_id
 
 
-def next_act_for(task: Task) -> dict:
+def next_act_for(task: Task, dual: Optional[dict] = None) -> dict:
     """The next act one task needs, and who may take it —
     derived from the state machine and the role rules, in one
     place, so the run sheet and the report can never disagree
     about what a state is owed. Terminal states owe nothing:
-    `action` is None and `detail` says how the task ended."""
+    `action` is None and `detail` says how the task ended.
+
+    `dual` is the task's dual-control standing (round 18), when
+    the caller computed it — the derivation itself holds no
+    store, so a caller that knows the plan passes the fact in.
+    A PLANNED task under dual control with one seat filled owes
+    a specific act with a specific exclusion list: the second
+    confirmation, from someone who is neither the planner nor
+    the first confirmer."""
     planner = task.planned_by or task.operator
     status = task.status
     if status == TaskStatus.PLANNED:
+        if dual and dual.get("awaiting_second_confirmer"):
+            first = dual["confirmers"][0]
+            return {
+                "action": "confirm",
+                "detail": (f"second confirmation of plan "
+                           f"v{task.plan_version} — dual control "
+                           f"({' and '.join(dual['reasons'])}): "
+                           f"{first} has confirmed; the plan "
+                           f"executes only when a second, "
+                           f"different confirmer confirms it too"),
+                "who": (f"a holder of a confirm-capable role "
+                        f"other than the planner ({planner}) "
+                        f"and the first confirmer ({first})"),
+            }
+        detail = (f"confirm plan v{task.plan_version} — or "
+                  f"amend it, or reject it")
+        if dual and dual.get("required"):
+            detail = (f"confirm plan v{task.plan_version} — dual "
+                      f"control ({' and '.join(dual['reasons'])}): "
+                      f"two distinct confirmers are owed — or "
+                      f"amend it, or reject it")
         return {
             "action": "confirm",
-            "detail": (f"confirm plan v{task.plan_version} — or "
-                       f"amend it, or reject it"),
+            "detail": detail,
             "who": (f"a holder of a confirm-capable role other "
                     f"than the planner ({planner}); "
                     f"self-confirmation is refused for every role"),

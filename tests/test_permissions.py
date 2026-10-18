@@ -101,8 +101,15 @@ def test_operator_plan_touching_supervisor_only_field_refused(service):
 def test_supervisor_plans_the_credit_limit_change(service):
     task = service.intake(CREDIT_LIMIT, "s.hale")
     assert task.status == TaskStatus.PLANNED
-    # An operator may confirm a plan they did not plan.
+    # Round 18, by design: a credit-limit change is a high-stakes
+    # field, so the plan stands under dual control — one
+    # confirmation no longer completes the gate. An operator may
+    # confirm a plan they did not plan, as the FIRST seat...
     task = service.confirm(task.task_id, "j.okafor")
+    assert task.status == TaskStatus.PLANNED
+    # ...and a second, different confirmer completes it.
+    service.enroll_operator("s.hale", "r.osei", "operator")
+    task = service.confirm(task.task_id, "r.osei")
     assert task.status == TaskStatus.CONFIRMED
     task = service.execute(task.task_id, "offline")
     assert task.status == TaskStatus.VERIFIED

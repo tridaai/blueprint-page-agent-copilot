@@ -306,12 +306,16 @@ def test_corrective_spawn_follows_the_role_rules(service):
 
 def test_corrective_for_a_supervisor_field_needs_a_supervisor(service):
     # Planned by the supervisor (credit_limit is held back from
-    # operators), confirmed by the operator, tampered: the diff is
-    # on a supervisor-only field, so the corrective plan is a
-    # supervisor's to spawn — an operator's spawn is refused.
+    # operators), confirmed under dual control (round 18: the
+    # field is high-stakes, so two distinct confirmers — a second
+    # operator is enrolled for the second seat), tampered: the
+    # diff is on a supervisor-only field, so the corrective plan
+    # is a supervisor's to spawn — an operator's spawn is refused.
+    service.enroll_operator("s.hale", "r.osei", "operator")
     task = service.intake("update customer 2041 credit limit to 30000",
                           "s.hale")
     service.confirm(task.task_id, "j.okafor")
+    service.confirm(task.task_id, "r.osei")
     task = service.execute(task.task_id, "offline",
                            tamper={1: "25000.00"})
     assert task.status == TaskStatus.DISCREPANCY
@@ -322,6 +326,7 @@ def test_corrective_for_a_supervisor_field_needs_a_supervisor(service):
     assert refused[-1]["detail"]["code"] == "field_not_permitted"
     child = service.spawn_corrective(task.task_id, "s.hale")
     service.confirm(child.task_id, "j.okafor")
+    service.confirm(child.task_id, "r.osei")
     child = service.execute(child.task_id, "offline")
     assert child.status == TaskStatus.VERIFIED
     customer = service.store.get_record("customers", "2041")

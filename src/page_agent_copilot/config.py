@@ -89,13 +89,32 @@ class Policy:
     # pinned answer, so the choice must be re-made) does not
     # spend new patience.
     max_clarifications: int = 2
+    # The dual-control threshold (round 18): a plan whose total
+    # credited amount reaches this figure — or that touches a
+    # governed high-stakes field (see policy.DUAL_CONTROL_FIELDS)
+    # — is not confirmed by one person: two distinct
+    # confirm-capable operators, neither of them the planner,
+    # must each confirm the same plan version before anything
+    # executes. The default is the credit cap itself: the largest
+    # credit the copilot may plan at all is exactly where a
+    # second pair of eyes becomes mandatory. It is a threshold,
+    # not a refusal — the plan still plans; the GATE is what
+    # scales with the stakes.
+    dual_control_cap: Decimal = Decimal("500.00")
 
     @classmethod
     def from_env(cls) -> "Policy":
         base = cls()
         raw = _env("COPILOT_CREDIT_CAP")
+        credit_cap = Decimal(raw) if raw else base.credit_cap
+        dual_raw = _env("COPILOT_DUAL_CONTROL_CAP")
         return cls(
-            credit_cap=Decimal(raw) if raw else base.credit_cap,
+            credit_cap=credit_cap,
+            # The dual-control threshold defaults to the credit
+            # cap in force — including an overridden one — unless
+            # it is named separately.
+            dual_control_cap=(Decimal(dual_raw) if dual_raw
+                              else credit_cap),
             max_plan_steps=_env_int(
                 "COPILOT_MAX_PLAN_STEPS", base.max_plan_steps),
             max_execution_steps=_env_int(
