@@ -16,6 +16,49 @@
   });
 
   let current = { order: null, customer: null, invoice: null, task: null };
+  let roleData = { roles: [], operators: [] };
+
+  // The acting role, from the shell's governed role data: the line
+  // under the operator name states what that name may do, and the
+  // rights summary is rendered from the same definitions the API
+  // enforces — the console shows what the shell will refuse.
+  function rightsLine(role) {
+    const acts = [];
+    if (role.can_plan) acts.push("plan");
+    if (role.can_confirm) acts.push("confirm others' plans");
+    if (role.can_amend) acts.push("amend");
+    if (role.can_execute) acts.push("execute");
+    if (role.can_administer) acts.push("edit roles");
+    return acts.length ? acts.join(", ") : "no actions — read-only";
+  }
+  function updateRoleLine() {
+    const name = ($("task-operator").value || "").trim();
+    const entry = roleData.operators.find((o) => o.id === name);
+    if (!entry) {
+      $("task-role-line").textContent = name
+        ? `Acting as ${name} — no role in the operator directory: this name may do nothing.`
+        : "";
+      return;
+    }
+    const role = roleData.operators.length
+      ? roleData.roles.find((r) => r.name === entry.role) : null;
+    $("task-role-line").textContent = role
+      ? `Acting as ${name} — role: ${role.name} (may ${rightsLine(role)}; ` +
+        `may never confirm a plan they planned themselves).`
+      : `Acting as ${name} — role: ${entry.role}.`;
+  }
+  async function refreshRoles() {
+    roleData = await api("/api/roles");
+    $("roles-list").textContent = roleData.roles.map((r) => {
+      const fields = Object.entries(r.fields)
+        .map(([k, v]) => `${k}: ${v.join(", ") || "—"}`).join(" · ");
+      return `${r.name} — may ${rightsLine(r)} | pages: ` +
+        `${r.pages.join(", ") || "—"} | fields: ${fields || "—"}`;
+    }).join("\n") + "\n" + roleData.operators.map(
+      (o) => `${o.id} → ${o.role}`).join("\n");
+    updateRoleLine();
+  }
+  $("task-operator").addEventListener("input", updateRoleLine);
 
   function showScreen(name) {
     document.querySelectorAll("nav button").forEach((b) =>
@@ -256,25 +299,37 @@
       task.status === "REFUSED" ? task.refusal_reason : "Plan drafted.";
     refreshTasks(); openTask(task.task_id);
   });
+  // Task actions go through here so a refusal — the gate's 409, a
+  // role's "not yours to confirm" — is shown in the console with
+  // the server's own reason, never swallowed.
+  async function actOnTask(path, body, after) {
+    const res = await fetch(path, json("POST", body));
+    const data = await res.json().catch(() => ({}));
+    $("task-action-note").textContent = res.ok ? ""
+      : "Refused: " + (data.detail || `${path} -> ${res.status}`);
+    if (res.ok && after) await after();
+    return res.ok;
+  }
+  const asOperator = () => $("task-operator").value || "operator";
   $("task-confirm").addEventListener("click", async () => {
-    await api(`/api/tasks/${current.task.task_id}/confirm`,
-      json("POST", { operator: $("task-operator").value || "operator" }));
-    refreshTasks(); openTask(current.task.task_id);
+    await actOnTask(`/api/tasks/${current.task.task_id}/confirm`,
+      { operator: asOperator() },
+      async () => { refreshTasks(); openTask(current.task.task_id); });
   });
   $("task-run-offline").addEventListener("click", async () => {
-    await api(`/api/tasks/${current.task.task_id}/execute`,
-      json("POST", { driver: "offline" }));
-    refreshAll(); openTask(current.task.task_id);
+    await actOnTask(`/api/tasks/${current.task.task_id}/execute`,
+      { driver: "offline", operator: asOperator() },
+      async () => { refreshAll(); openTask(current.task.task_id); });
   });
   $("task-reject").addEventListener("click", async () => {
-    await api(`/api/tasks/${current.task.task_id}/reject`,
-      json("POST", { operator: $("task-operator").value || "operator" }));
-    refreshTasks(); openTask(current.task.task_id);
+    await actOnTask(`/api/tasks/${current.task.task_id}/reject`,
+      { operator: asOperator() },
+      async () => { refreshTasks(); openTask(current.task.task_id); });
   });
   $("task-replan").addEventListener("click", async () => {
-    await api(`/api/tasks/${current.task.task_id}/replan`,
-      json("POST", { operator: $("task-operator").value || "operator" }));
-    refreshTasks(); openTask(current.task.task_id);
+    await actOnTask(`/api/tasks/${current.task.task_id}/replan`,
+      { operator: asOperator() },
+      async () => { refreshTasks(); openTask(current.task.task_id); });
   });
   $("task-amend-btn").addEventListener("click", async () => {
     const seq = parseInt($("amend-seq").value, 10);
@@ -298,7 +353,8 @@
 
   async function refreshAll() {
     await Promise.all([refreshOrders(), refreshCustomers(),
-                       refreshInvoices(), refreshTasks()]);
+                       refreshInvoices(), refreshTasks(),
+                       refreshRoles()]);
   }
   refreshAll();
 

@@ -132,6 +132,7 @@
     <div class="panel">
       <h3>New task</h3>
       <div class="field"><label for="task-operator">Operator</label><input id="task-operator" type="text" value="j.okafor"></div>
+      <div class="note" id="task-role-line"></div>
       <textarea id="task-text" placeholder="e.g. raise a credit memo for invoice 4471, reason damaged goods, $120"></textarea>
       <div style="margin-top:8px;"><button class="act" id="task-create">Draft plan</button>
       <span class="note" id="task-create-note"></span></div>
@@ -139,6 +140,14 @@
     <div class="panel">
       <h3>Tasks</h3>
       <table id="tasks-table"><thead><tr><th>Task</th><th>Text</th><th>Status</th><th>Operator</th><th>Driver</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel">
+      <h3>Roles</h3>
+      <p class="note">Who may do what is governed data, enforced by the shell at plan time, at
+        confirmation, and again at execution. A plan is confirmed by a second person — never its
+        planner — so to confirm a plan below, set the operator name above to a supervisor
+        (s.hale). Role definitions are edited only by a supervisor, and every edit is recorded.</p>
+      <div id="roles-list" class="diff"></div>
     </div>
     <div class="panel" id="task-detail" hidden>
       <h3>Task <span id="task-id-label"></span> — <span id="task-status-chip"></span></h3>
@@ -153,6 +162,7 @@
         <button class="act secondary" id="task-reject">Reject plan</button>
         <button class="act secondary" id="task-replan">Re-plan</button>
       </div>
+      <div id="task-action-note" class="err" style="margin-top:8px;"></div>
       <div id="task-amend" hidden>
         <h3 style="margin-top:16px;">Amend the plan (before confirmation)</h3>
         <div class="field"><label for="amend-seq">Step</label><input id="amend-seq" type="number" min="1" value="1"></div>
