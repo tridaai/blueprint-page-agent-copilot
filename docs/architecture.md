@@ -58,6 +58,43 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   fields on any record (`payment_field`), non-allowlisted fields
   (`field_not_plannable`), ungoverned status values
   (`value_not_governed`), missing records (`record_not_found`).
+- **Roles** (`roles.py`) — who may do what, held as governed data,
+  not conditionals. A role record names the console pages it may
+  work on, the record fields its plans may touch per kind, and its
+  action classes (plan, confirm, amend, execute, administer); an
+  operator directory maps names to roles, and an unknown name
+  holds no role. Defaults: **viewer** (read-only — no fields, no
+  action classes), **operator** (plans, amends, executes, confirms
+  others' plans; a customer's `credit_limit` is held back),
+  **supervisor** (every field, plus administering the role
+  definitions). Definitions and the directory are store records
+  (kinds `roles` / `operators`), seeded from the defaults in
+  `roles.py` through the module's strict loader — the same loader
+  validates every edit, so a definition naming an ungovernable
+  field or page can never be stored. Enforcement lives in the
+  service, at four points:
+  - **Plan time** — the planner's role must be allowed to plan,
+    and the derived plan's pages and fields must fit its
+    allowlist, or the task is REFUSED (`unknown_operator`,
+    `role_cannot_plan`, `field_not_permitted`,
+    `page_not_permitted`) before any human is asked anything.
+  - **Confirmation** — a confirm-capable role, held by someone
+    other than the planner. Self-confirmation is refused for
+    every role, with names compared normalised so a casing or
+    spacing variant of the planner's name is still the planner.
+  - **Amendment** — an amend-capable role, and every amended field
+    inside the *amender's* allowlist: an amendment cannot widen a
+    plan into a field the amender's own role holds back.
+  - **Execution** — the check runs again, against the definitions
+    in force at that moment, for both the planner's role and the
+    executor's (the executing operator is an explicit input,
+    defaulting to the task's operator). A role narrowed after
+    confirmation holds the task at CONFIRMED — refused, recorded,
+    nothing run — until the definitions allow the plan again.
+  Role edits are recorded acts: only a `can_administer` role may
+  make them, the edit must change something, and the who/when and
+  the field-level diff land in the audit trail under the reserved
+  `roles` scope (`GET /api/roles-audit`).
 - **State machine** (`service.py`) — DRAFT → PLANNED → CONFIRMED →
   VERIFIED / DISCREPANCY, with REFUSED as the plan-time terminal.
   Execution requires CONFIRMED; the check is in the service against
@@ -113,7 +150,13 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   `plan_replanned` (superseded version → new version),
   `step_executed` / `step_reported` (before/after, driver),
   `execution_completed`, `verification_passed` /
-  `verification_failed` (checked count, diffs).
+  `verification_failed` (checked count, diffs). Permission
+  refusals are acts too, recorded before they raise:
+  `confirmation_refused` (unknown operator, a role that may not
+  confirm, or `self_confirmation`), `amendment_refused`,
+  `execution_refused` (the role, the field, whose check failed) —
+  and, under the `roles` scope, `role_updated` (who, when, and
+  the field-level diff of the definition).
 
 ## The PageAgent API, as verified
 
@@ -172,6 +215,13 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
 - **Payment fields are read-only everywhere in the copilot's
   world**: plans refuse them, and the console's own save endpoint
   refuses a payload carrying one (HTTP 422).
+- **Authority is checked when exercised, not when granted.** A
+  confirmation given under one set of role definitions does not
+  carry a plan past a narrower set: execution re-reads the stored
+  definitions and re-checks the plan against them. The same
+  discipline binds the person — the name that planned a task is
+  structurally unable to be the name that confirms it, whatever
+  role either attempt claims.
 
 ## Production profile
 

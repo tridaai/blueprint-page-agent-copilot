@@ -70,6 +70,20 @@ evidence.
   before execution, execution refuses, the task parks in STALE
   naming the changed records, and nothing is written; a re-plan
   derives a fresh version from the records as they now stand.
+- **Roles and permissions** — who may do what is governed data, not
+  a name on a form. Roles (viewer, operator, supervisor) carry
+  page and field allowlists plus the action classes open to them
+  (plan, confirm, amend, execute, administer), stored as records
+  and validated by a strict loader. The planner's role is checked
+  before a plan exists; confirmation needs a confirm-capable role
+  held by someone other than the planner — self-confirmation is
+  refused for every role; amendments stay inside the amender's own
+  fields; and execution re-checks the plan against the definitions
+  in force at that moment, so a role narrowed after confirmation
+  holds the task instead of running it. Role edits are supervisor
+  acts, recorded with their diffs. A viewer plans, confirms,
+  amends, and executes nothing; a customer's credit limit is a
+  supervisor-only field.
 - **Two drivers, one step interface** — the real `page-agent`
   package in the operator's browser (live), and a deterministic
   offline driver (tests, evals, fallback), labelled honestly in
@@ -150,9 +164,11 @@ so a task it cannot derive exactly is refused as
 Plan-time refusals, each with its reason recorded on the task:
 `credit_above_cap`, `payment_field`, `delete_refused`,
 `field_not_plannable`, `value_not_governed`, `record_not_found`,
-`no_plan_derivable`. Amendments face the same checks, plus
-`step_not_found` and `invalid_amendment` for a change that names
-no step or carries no value.
+`no_plan_derivable` — and the role refusals: `unknown_operator`,
+`role_cannot_plan`, `field_not_permitted`, `page_not_permitted`.
+Amendments face the same checks, plus `step_not_found` and
+`invalid_amendment` for a change that names no step or carries no
+value.
 
 ## Verification and audit
 
@@ -170,10 +186,15 @@ version, the confirming operator, each step's before/after values,
 the driver name, and the verification outcome — plus the lifecycle
 of the plan itself: `plan_amended` (with the recorded changes),
 `plan_rejected`, `execution_stale` (with the changed records), and
-`plan_replanned`. Plan versions stay readable
+`plan_replanned`. Permission refusals are recorded too, before
+they raise: `confirmation_refused`, `amendment_refused`,
+`execution_refused`. Plan versions stay readable
 (`GET /api/tasks/{id}/plans`), and
 `GET /api/tasks/{id}/plan-diff?from_version=1&to_version=2`
-renders the field-level diff between any two of them.
+renders the field-level diff between any two of them. The roles
+themselves are readable at `GET /api/roles`, editable by a
+supervisor at `PUT /api/roles/{name}`, and their edit history is
+at `GET /api/roles-audit`.
 
 ## Layout
 
@@ -185,6 +206,8 @@ src/page_agent_copilot/
                   also preconditions and policy-checked amendments
   plandiff.py     the field-level diff between two plan versions
   policy.py       the plan-time refusals (cap, payment fields, deletes)
+  roles.py        roles as governed records: pages, field allowlists,
+                  action classes, the strict loader, the checks
   drivers.py      the step interface + the deterministic offline driver
   verify.py       post-state diff against the approved plan
   store.py        the store port: in-memory / SQLite / PostgreSQL
@@ -197,7 +220,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (19 cases)
+evals/            the scripted-task gate (25 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -205,15 +228,19 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 60 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 84 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 19/19 cases: happy paths diffed exactly (including
+make evals   # 25/25 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
              # version binding, a policy-breaking amendment refused,
-             # a stale plan refused before writing anything, and the
-             # live bridge graded on store state, not its report
+             # a stale plan refused before writing anything, the
+             # live bridge graded on store state, not its report —
+             # and the permissions set: a viewer cannot plan, a
+             # supervisor-only field refused for an operator,
+             # self-confirmation refused, a role narrowed after
+             # confirmation blocking execution, role edits audited
 ```
 
 ## Honest status
