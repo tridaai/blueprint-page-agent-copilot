@@ -108,6 +108,26 @@ class Plan(BaseModel):
     superseded: bool = False
     created_at: str = ""
 
+    @property
+    def pages(self) -> list[str]:
+        """The console pages this plan works on, distinct, in the
+        order the plan first reaches each — derived from the steps
+        on every read, never stored, so a plan can never claim a
+        span its steps do not have (round 12)."""
+        seen: list[str] = []
+        for step in self.steps:
+            if step.page not in seen:
+                seen.append(step.page)
+        return seen
+
+    @property
+    def is_multi_page(self) -> bool:
+        """A plan spanning two or more pages is a multi-page flow:
+        its execution must navigate between the pages, and both
+        the planner's and the executor's roles must allow every
+        page it names."""
+        return len(self.pages) > 1
+
 
 # ------------------------------------------------------------- plan diffs
 
@@ -247,6 +267,22 @@ class StepOutcome(BaseModel):
     detail: str = ""
 
 
+class PageNavigation(BaseModel):
+    """One page transition inside an execution (round 12): before
+    step `seq` could run, the driver moved from `from_page` to
+    `to_page`. Navigations are recorded on the attempt that made
+    them, in the order they happened; they are not steps — they
+    consume no step budget and produce no record change. For the
+    offline driver a navigation is a recorded no-op transition;
+    for the live bridge it is a protocol report the shell checks
+    the step reports against."""
+
+    seq: int
+    from_page: str
+    to_page: str
+    driver: str
+
+
 class ExecutionAttempt(BaseModel):
     """One execution attempt at a task's confirmed plan, as a
     stored record (kind `executions`, keyed `<task_id>:<number>`).
@@ -299,6 +335,9 @@ class ExecutionAttempt(BaseModel):
     started_at: str = ""
     finished_at: str = ""
     steps: list[StepOutcome] = Field(default_factory=list)
+    # The page transitions this attempt made between steps, in
+    # order (round 12). A single-page attempt has none.
+    navigations: list[PageNavigation] = Field(default_factory=list)
     failed_seq: Optional[int] = None
     error: Optional[str] = None
     state_lines: list[str] = Field(default_factory=list)
@@ -570,6 +609,18 @@ class StepReportIn(BaseModel):
     driver: str = "page-agent-live"
     ok: bool = True
     detail: str = ""
+
+
+class NavigationReportIn(BaseModel):
+    """The browser bridge's report that it has moved between
+    console pages (round 12): it stood on `from_page` and now
+    stands on `to_page`, ahead of the step that works there. The
+    shell checks the report against where the execution actually
+    stands and which step comes next — a navigation that does not
+    fit is refused and recorded, like any protocol failure."""
+    driver: str = "page-agent-live"
+    from_page: str
+    to_page: str
 
 
 class ConsoleSaveIn(BaseModel):

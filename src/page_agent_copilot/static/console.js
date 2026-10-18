@@ -639,6 +639,9 @@
       const lines = a.steps.map((s) =>
         s.ok ? `✓ step ${s.seq}: ${s.detail}`
              : `✗ step ${s.seq}: FAILED — ${s.detail}`);
+      (a.navigations || []).forEach((n) => lines.push(
+        `↪ before step ${n.seq}: navigated ${n.from_page} → `
+        + `${n.to_page} (${n.driver})`));
       a.state_lines.forEach((l) => lines.push(`  left standing: ${l}`));
       const pre = document.createElement("div");
       pre.className = "diff";
@@ -736,6 +739,17 @@
       head.innerHTML = `<b>Plan v${plan.version}</b>` +
         (plan.superseded ? " (superseded)" : "") + ` — ${plan.summary}`;
       planDiv.appendChild(head);
+      if (plan.pages && plan.pages.length) {
+        const pagesLine = document.createElement("p");
+        pagesLine.className = "note";
+        pagesLine.textContent =
+          `Pages: ${plan.pages.join(" → ")}` +
+          (plan.multi_page
+            ? " — a multi-page flow: execution navigates between "
+              + "these pages, and the navigation is on the attempt."
+            : "");
+        planDiv.appendChild(pagesLine);
+      }
       const ol = document.createElement("ol"); ol.className = "steps";
       plan.steps.forEach((s) => {
         const li = document.createElement("li");

@@ -39,6 +39,8 @@ from .models import (
     ReplanIn,
     RestartIn,
     ResumeIn,
+    NavigationReportIn,
+    Plan,
     RoleUpdateIn,
     StepReportIn,
     TaskIntake,
@@ -47,7 +49,7 @@ from .models import (
 from .policy import PlanRefusal
 from .reads import ConsoleReads
 from .records import apply_field_change, create_credit_memo
-from .roles import RoleError
+from .roles import PAGE_CATALOGUE, RoleError
 from .service import CopilotService, GateError
 from .store import Store, build_store
 from .templates import (
@@ -58,6 +60,20 @@ from .templates import (
 
 log = logging.getLogger("page_agent_copilot.api")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def _plan_json(plan: Optional[Plan]) -> Optional[dict]:
+    """A plan as the API serves it: the stored fields, plus the
+    page span derived from the steps (round 12) — the pages the
+    plan works on, in the order it reaches them, and whether it is
+    a multi-page flow. Derived on every serve, never stored, so
+    the served span is always the steps' own span."""
+    if plan is None:
+        return None
+    data = plan.model_dump(mode="json")
+    data["pages"] = plan.pages
+    data["multi_page"] = plan.is_multi_page
+    return data
 
 
 def create_app(settings: Optional[Settings] = None,
@@ -236,7 +252,7 @@ def create_app(settings: Optional[Settings] = None,
     def intake(body: TaskIntake):
         task = service.intake(body.text, body.operator)
         return {"task": task.model_dump(mode="json"),
-                "plan": (service.get_plan(task.task_id).model_dump(mode="json")
+                "plan": (_plan_json(service.get_plan(task.task_id))
                          if task.plan_version else None)}
 
     @app.get("/api/tasks")
@@ -251,7 +267,7 @@ def create_app(settings: Optional[Settings] = None,
         plan = service.get_plan(task_id)
         report = service.get_verification(task_id)
         return {"task": task.model_dump(mode="json"),
-                "plan": plan.model_dump(mode="json") if plan else None,
+                "plan": _plan_json(plan),
                 "plan_versions": [p.version
                                   for p in service.list_plans(task_id)],
                 "attempts": [a.model_dump(mode="json")
@@ -286,7 +302,7 @@ def create_app(settings: Optional[Settings] = None,
         child = service.spawn_corrective(task_id, body.operator)
         plan = service.get_plan(child.task_id)
         return {"task": child.model_dump(mode="json"),
-                "plan": plan.model_dump(mode="json") if plan else None}
+                "plan": _plan_json(plan)}
 
     @app.post("/api/tasks/{task_id}/accept-deviation")
     def accept_deviation(task_id: str, body: AcceptDeviationIn):
@@ -302,7 +318,7 @@ def create_app(settings: Optional[Settings] = None,
     def plans(task_id: str):
         if service.get_task(task_id) is None:
             raise KeyError(f"task {task_id} does not exist")
-        return [p.model_dump(mode="json")
+        return [_plan_json(p)
                 for p in service.list_plans(task_id)]
 
     @app.get("/api/tasks/{task_id}/plans/{version}")
@@ -311,7 +327,7 @@ def create_app(settings: Optional[Settings] = None,
         if plan is None:
             raise KeyError(
                 f"task {task_id} has no plan version {version}")
-        return plan.model_dump(mode="json")
+        return _plan_json(plan)
 
     @app.get("/api/tasks/{task_id}/plan-diff")
     def plan_diff(task_id: str, from_version: int, to_version: int):
@@ -328,7 +344,7 @@ def create_app(settings: Optional[Settings] = None,
         task, plan, changes = service.amend(
             task_id, body.operator, body.changes)
         return {"task": task.model_dump(mode="json"),
-                "plan": plan.model_dump(mode="json"),
+                "plan": _plan_json(plan),
                 "changes": [c.model_dump(mode="json") for c in changes]}
 
     @app.post("/api/tasks/{task_id}/reject")
@@ -341,7 +357,7 @@ def create_app(settings: Optional[Settings] = None,
         task = service.replan(task_id, body.operator)
         plan = service.get_plan(task_id)
         return {"task": task.model_dump(mode="json"),
-                "plan": plan.model_dump(mode="json") if plan else None}
+                "plan": _plan_json(plan)}
 
     @app.post("/api/tasks/{task_id}/confirm")
     def confirm(task_id: str, body: ConfirmIn):
@@ -388,6 +404,14 @@ def create_app(settings: Optional[Settings] = None,
         # on the records, named — nothing is cleaned up.
         task = service.abandon(task_id, body.operator, body.reason)
         return task.model_dump(mode="json")
+
+    # -- pages ---------------------------------------------------------
+    @app.get("/api/pages")
+    def pages():
+        # The console's pages as governed data (round 12): id,
+        # title, and the record kinds each page hosts — the same
+        # catalogue the role allowlists reference.
+        return {"pages": PAGE_CATALOGUE}
 
     # -- roles ---------------------------------------------------------
     @app.get("/api/roles")
@@ -560,7 +584,7 @@ def create_app(settings: Optional[Settings] = None,
             name, body.version, body.slots, body.operator)
         plan = service.get_plan(task.task_id)
         return {"task": task.model_dump(mode="json"),
-                "plan": plan.model_dump(mode="json") if plan else None}
+                "plan": _plan_json(plan)}
 
     @app.get("/api/templates-audit")
     def templates_audit():

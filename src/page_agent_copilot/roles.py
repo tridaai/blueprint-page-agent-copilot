@@ -48,8 +48,42 @@ from pydantic import BaseModel, Field
 
 from .models import PLANNABLE_FIELDS, RECORD_KINDS, Plan, StepAction
 
+# The console's pages, as governed data (round 12): each page has
+# an id — the name a plan step carries and a role's allowlist
+# references — a title for the console, and the record kinds the
+# page hosts. The planner's PAGE_FOR_KIND maps every record kind
+# to the page that hosts it; a test pins the two to each other, so
+# the catalogue and the planner can never drift apart. A plan that
+# spans two or more of these pages is a multi-page flow.
+PAGE_CATALOGUE: list[dict] = [
+    {"id": "Orders", "title": "Orders",
+     "kinds": ["orders"]},
+    {"id": "Customers", "title": "Customers",
+     "kinds": ["customers"]},
+    {"id": "Invoices", "title": "Invoices",
+     "kinds": ["invoices", "credit_memos"]},
+]
+
 # The console screens a plan step can name (planner.PAGE_FOR_KIND).
-KNOWN_PAGES = frozenset({"Orders", "Customers", "Invoices"})
+KNOWN_PAGES = frozenset(page["id"] for page in PAGE_CATALOGUE)
+
+
+def page_title(page_id: str) -> str:
+    """A page's console title, from the catalogue."""
+    for page in PAGE_CATALOGUE:
+        if page["id"] == page_id:
+            return page["title"]
+    return page_id
+
+
+def page_for_kind(record_kind: str) -> Optional[str]:
+    """The page that hosts a record kind, from the catalogue —
+    the same answer planner.PAGE_FOR_KIND gives, derived from the
+    catalogue so the two are one fact stated once."""
+    for page in PAGE_CATALOGUE:
+        if record_kind in page["kinds"]:
+            return page["id"]
+    return None
 
 # The fields of a CREATE step, per record kind. A credit memo is
 # created whole, so PLANNABLE_FIELDS lists no editable fields for
