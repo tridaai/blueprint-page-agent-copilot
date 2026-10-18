@@ -493,7 +493,13 @@ def test_no_batch_route_performs_a_decision(client):
     """The round's invariant, asserted against the route table
     the way the diligence workbench asserts its no-bulk-decision
     rule: batch routes are creation plus reads, and every route
-    that takes a decision names a task id."""
+    that takes a decision names a task id. One deliberate
+    addition since round 9: the audit export
+    (`POST /api/batches/{batch_id}/audit/export`) — a read of
+    the batch's trail that records itself in the batches scope
+    and decides nothing about any member. It is the only batch
+    write beside creation, it names no decision segment, and
+    the probe below proves it leaves every member untouched."""
     app = client.app
     batch_routes = []
     for route in app.routes:
@@ -501,9 +507,12 @@ def test_no_batch_route_performs_a_decision(client):
         methods = getattr(route, "methods", set()) or set()
         if "batch" in path:
             batch_routes.append((path, methods))
-        # No route anywhere pairs a batch id with an act.
+        # No route anywhere pairs a batch id with a decision:
+        # reads, plus the one self-recording audit export.
         if "{batch_id}" in path:
-            assert methods <= {"GET"}, (
+            assert methods <= {"GET"} or (
+                path == "/api/batches/{batch_id}/audit/export"
+                and methods == {"POST"}), (
                 f"batch route {path} allows {methods}")
             assert not (set(path.split("/")) & DECISION_SEGMENTS), (
                 f"batch route {path} names a decision")
@@ -511,9 +520,12 @@ def test_no_batch_route_performs_a_decision(client):
         if path.startswith("/api/tasks/") and "POST" in methods:
             assert "{task_id}" in path, (
                 f"task decision route without a task id: {path}")
-    # The one batch write is creation itself.
+    # The batch writes are creation — and the audit export,
+    # which decides nothing (proven by the probe below).
     posts = [(p, m) for p, m in batch_routes if "POST" in m]
-    assert posts == [("/api/batches", {"POST"})], posts
+    assert posts == [("/api/batches", {"POST"}),
+                     ("/api/batches/{batch_id}/audit/export",
+                      {"POST"})], posts
     # And the plausible bulk paths are simply not there.
     created = client.post("/api/batches", json={
         "operator": "op", "members": [{"text": CREDIT}]})
@@ -531,6 +543,16 @@ def test_no_batch_route_performs_a_decision(client):
     # still awaiting its own per-task confirmation.
     sheet = client.get(f"/api/batches/{bid}/run-sheet").json()
     assert sheet["members"][0]["status"] == "PLANNED"
+    # And the one batch write beside creation — the audit
+    # export — decides nothing either: it reads the trail and
+    # records itself, and the member stands exactly as it did.
+    exported = client.post(f"/api/batches/{bid}/audit/export",
+                           json={"operator": "s.hale"})
+    assert exported.status_code == 200
+    assert exported.json()["scope"] == {"kind": "batch", "id": bid}
+    sheet = client.get(f"/api/batches/{bid}/run-sheet").json()
+    assert sheet["members"][0]["status"] == "PLANNED"
+    assert sheet["status"] == "open"
 
 
 # -- the store round-trip -------------------------------------------------------
