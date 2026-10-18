@@ -11,6 +11,7 @@ Exit 0 = PASS. Every case runs on a fresh in-memory store.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -23,6 +24,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 from page_agent_copilot.api import create_app  # noqa: E402
 from page_agent_copilot.batches import BatchMemberIn  # noqa: E402
 from page_agent_copilot.config import (  # noqa: E402
+    LOCAL_BUNDLE_PATH,
+    PINNED_PAGE_AGENT_VERSION,
+    PROFILES,
+    ConfigError,
+    DeploymentProfile,
     PageAgentConfig,
     Policy,
     Settings,
@@ -2464,6 +2470,140 @@ def _():
     expect(svc.task_ending(task)["label"]
            == "clarification_exhausted",
            "exhaustion is not its own taxonomy class")
+
+
+# -- Round 16: deployment profiles ------------------------------------------
+# How the agent ships and where the model lives is governed
+# configuration: a named profile selects the bundle delivery (the
+# committed bundle, or a CDN script pinned to the bundled version)
+# and the endpoint class (hosted, or self-hosted inside the
+# customer's network). The page serves the profile's bundle, the
+# CSP is computed from the profile, attempts record the deployment
+# they ran under, and a misconfiguration refuses at config load.
+
+PROFILE_CDN_URL = ("https://cdn.jsdelivr.net/npm/"
+                   f"page-agent@{PINNED_PAGE_AGENT_VERSION}"
+                   "/dist/iife/page-agent.demo.js")
+PROFILE_HOSTED = PageAgentConfig(
+    model="qwen-plus",
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    api_key="sk-eval-key")
+
+
+def profile_named(name, cdn_url=""):
+    delivery, endpoint_class = PROFILES[name]
+    return DeploymentProfile(name=name, delivery=delivery,
+                             endpoint_class=endpoint_class,
+                             cdn_url=cdn_url)
+
+
+def profile_settings(prof, page_agent):
+    return Settings(store_kind="memory", store_target="",
+                    policy=Policy(), page_agent=page_agent,
+                    profile=prof)
+
+
+@case("profiles: the local profile serves the committed bundle "
+      "and a self-only script policy")
+def _():
+    client = TestClient(create_app(
+        profile_settings(profile_named("local-hosted"),
+                         PageAgentConfig()),
+        InMemoryStore(), seed=True))
+    page = client.get("/")
+    expect(f'src="{LOCAL_BUNDLE_PATH}"' in page.text,
+           "the console page does not load the committed bundle")
+    expect(PROFILE_CDN_URL not in page.text,
+           "the local profile served a CDN bundle")
+    csp = page.headers["content-security-policy"]
+    expect("script-src 'self';" in csp, f"script-src in {csp}")
+    expect("cdn.jsdelivr.net" not in csp,
+           f"a foreign script origin in the local CSP: {csp}")
+    cfg = client.get("/api/agent-config").json()
+    expect(cfg["profile"] == "local-hosted", f"profile {cfg}")
+    expect(cfg["delivery"] == "local", f"delivery {cfg}")
+    expect(cfg["endpointClass"] == "hosted", f"class {cfg}")
+    expect(cfg["bundleURL"] == LOCAL_BUNDLE_PATH, f"bundle {cfg}")
+
+
+@case("profiles: the CDN profile serves the pinned script, names "
+      "its origin in the CSP, and the version matches the bundle")
+def _():
+    client = TestClient(create_app(
+        profile_settings(profile_named("cdn-hosted",
+                                       PROFILE_CDN_URL),
+                         PROFILE_HOSTED),
+        InMemoryStore(), seed=True))
+    page = client.get("/")
+    expect(f'src="{PROFILE_CDN_URL}"' in page.text,
+           "the console page does not load the pinned CDN script")
+    expect(LOCAL_BUNDLE_PATH not in page.text,
+           "the CDN profile also served the local bundle")
+    csp = page.headers["content-security-policy"]
+    expect("script-src 'self' https://cdn.jsdelivr.net" in csp,
+           f"script-src in {csp}")
+    expect("connect-src 'self' https://dashscope.aliyuncs.com"
+           in csp, f"connect-src in {csp}")
+    cfg = client.get("/api/agent-config").json()
+    expect(cfg["delivery"] == "cdn", f"delivery {cfg}")
+    expect(cfg["bundleURL"] == PROFILE_CDN_URL, f"bundle {cfg}")
+    expect(f"page-agent@{PINNED_PAGE_AGENT_VERSION}"
+           in cfg["bundleURL"], "the served pin is not the "
+           "bundled version")
+
+
+@case("profiles: a self-hosted keyless deployment validates, "
+      "and the attempt records the deployment")
+def _():
+    page_agent = PageAgentConfig(
+        model="llama3.1", base_url="http://nim.internal:8000/v1")
+    settings = profile_settings(
+        profile_named("local-self-hosted"), page_agent)
+    settings.validate()  # keyless self-hosted is a valid profile
+    svc = CopilotService(settings, InMemoryStore())
+    svc.seed()
+    task = svc.intake(CREDIT, "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED,
+           f"status {task.status}")
+    (attempt,) = svc.get_attempts(task.task_id)
+    expect(attempt.deployment_profile == "local-self-hosted",
+           f"attempt profile {attempt.deployment_profile}")
+    expect(attempt.endpoint_class == "self_hosted",
+           f"attempt class {attempt.endpoint_class}")
+    expect(attempt.bundle_delivery == "local",
+           f"attempt delivery {attempt.bundle_delivery}")
+    expect(attempt.model == "llama3.1",
+           f"attempt model {attempt.model}")
+
+
+@case("profiles: a hosted endpoint without a key refuses at "
+      "config load, by name")
+def _():
+    keys = ("COPILOT_PROFILE", "PAGEAGENT_MODEL",
+            "PAGEAGENT_BASE_URL", "PAGEAGENT_API_KEY")
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ["COPILOT_PROFILE"] = "local-hosted"
+        os.environ["PAGEAGENT_MODEL"] = "qwen-plus"
+        os.environ["PAGEAGENT_BASE_URL"] = \
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        os.environ.pop("PAGEAGENT_API_KEY", None)
+        try:
+            Settings.from_env()
+        except ConfigError as exc:
+            expect(exc.code == "hosted_key_missing",
+                   f"refusal code {exc.code}")
+        else:
+            raise AssertionError(
+                "a hosted endpoint with no key loaded cleanly")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def main() -> int:
