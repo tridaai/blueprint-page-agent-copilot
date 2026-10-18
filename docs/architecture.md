@@ -194,8 +194,42 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   asking, and the same examples run as cases in the eval gate —
   a planner or policy change that breaks a template fails the
   gate and marks the version broken in the library by name and
-  version, which is the seed the template regression gate
-  (round 19) grows from.
+  version. **The regression gate (round 19)** grows from that
+  seed: health stays a read, but a version becomes the
+  **default** — what a name-only instantiation resolves to —
+  only by **promotion**, and promotion is earned. An
+  **evaluation** is a recorded act (any enrolled, active name)
+  that runs the health machinery once and stores its verdict as
+  an append-only record (kind `template_evaluations`) against
+  the version's **content hash** — SHA-256 over the canonical
+  content, so the verdict belongs to exact bytes. **Promotion**
+  is a supervisor act the gate checks in order: the version is
+  not already the default; the promoter is not its publisher
+  (`promoter_was_publisher`); a standing evaluation exists —
+  the latest record grading the content as it *now* hashes,
+  else `no_evaluation`, or `hash_mismatch` when records exist
+  but grade other bytes — and passes (`evaluation_failed`, the
+  failing examples named); the standing evaluation was not run
+  by the publisher (`evaluator_was_publisher`); and the
+  candidate does not **regress**: every example the incumbent
+  default's standing passes is rendered through the candidate
+  and must still derive to the shape the *incumbent* pins —
+  the incumbent's contract is the ruler, the way a fixed eval
+  split is the ruler in the diligence blueprint's profile gate
+  — with broken examples and the candidate's gains both named
+  in the refusal. A successful promotion appends its own record
+  (kind `template_promotions`); the default is the version the
+  latest one names, and rollback is the same act aimed back.
+  The seeded versions were published by nobody, so they are
+  grandfathered as defaults with the health as their standing,
+  marked `seeded` in the view — no evaluation records are
+  fabricated for them. A name whose versions are all published
+  and none promoted has no default: a name-only instantiation
+  refuses `no_promoted_default`, while an explicit version
+  always serves. The library view carries the gate facts per
+  version (`default`, `promoted`, `standing`, `content_hash`,
+  the latest `evaluation` with a `hash_matches` flag), and the
+  console shows them beside the health.
 - **Batches** (`batches.py`, `service.py`) — work submitted
   together, as one governed record (kind `batches`), following
   the same records pattern: the record is written once at
@@ -895,7 +929,12 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   `template_published` (the name, the version, the version it
   supersedes), `template_refused` (the act, the target, the
   code), and `template_instantiation_refused` (the template, the
-  version, the code, the reason); and on the task itself,
+  version, the code, the reason); the regression gate adds
+  `template_evaluated` (the name, the version, the verdict, the
+  content hash it graded) and `template_promoted` (the name, the
+  version, the default it replaced, the hash, the standing's
+  source), with the gate's refusals riding `template_refused`
+  under its own codes; and on the task itself,
   `template_instantiated` (the template, the exact version used,
   the version requested, and the slot values). Batches add:
   under the `batches` scope, `batch_created` (the members as

@@ -320,6 +320,29 @@ evidence.
   is marked **BROKEN** in the library, computed on read (the
   eval runner stores no results, so health is the examples,
   re-derived at the moment of asking).
+- **Template regression gate** — publishing never made a
+  version the one the desk uses, and since this round it no
+  longer even looks that way: a name-only instantiation resolves
+  to the name's **promoted default**, never to whatever was
+  published last. Promotion is a separate recorded supervisor
+  act with the discipline of the profile gate in the diligence
+  blueprint: a passing **evaluation** of the version's exact
+  content hash must be on record (evaluations are append-only
+  records, so bytes changed after evaluation answer
+  `hash_mismatch`), run by someone other than the version's
+  publisher; the promoter must not be the publisher either; and
+  the candidate must not **regress** against the standing
+  default — every example the incumbent passes, rendered
+  through the candidate, must still derive to the incumbent's
+  pinned shape, with the broken examples and the candidate's
+  gains both named in the refusal. Rollback is the same act
+  aimed at a previous version. The seeded versions were
+  published by nobody: they are grandfathered as their names'
+  defaults, their standing the health itself, marked `seeded` —
+  no evaluation records are fabricated for them. A brand-new
+  template has no default until one is promoted, and says so
+  (`no_promoted_default`) rather than quietly serving its
+  first version.
 - **Batch work, without bulk decisions** — the desk's work
   arrives as a list, so a **batch** groups the tasks submitted
   together: task texts and template instantiations in one
@@ -653,7 +676,17 @@ version used either way. Library acts are recorded in their own
 audit scope at `GET /api/templates-audit` (`template_published`,
 `template_refused`, `template_instantiation_refused`), and each
 instantiated task's own trail carries `template_instantiated`
-with the template, the version, and the slot values. A batch
+with the template, the version, and the slot values. The
+library reads also name each version's standing — the promoted
+default, a grandfathered `seeded` default, or merely
+`published` — with its content hash and its latest evaluation.
+The regression gate's acts ride the same scope:
+`template_evaluated` at `POST /api/templates/{name}/evaluate`
+and `template_promoted` at `POST /api/templates/{name}/promote`,
+their refusals recorded as `template_refused` with the gate's
+codes (`no_evaluation`, `hash_mismatch`, `evaluation_failed`,
+`evaluator_was_publisher`, `promoter_was_publisher`,
+`regression`, `already_default`). A batch
 is created at `POST /api/batches` — the only batch write that
 exists — and read at `GET /api/batches`,
 `GET /api/batches/{id}`, `GET /api/batches/{id}/run-sheet`
@@ -701,7 +734,9 @@ src/page_agent_copilot/
   roles.py        roles as governed records: pages, field allowlists,
                   action classes, the strict loader, the checks
   templates.py    the task library: templates as governed records —
-                  pattern, slots, pinned examples, the strict loader
+                  pattern, slots, pinned examples, the strict loader;
+                  evaluations and the promotion gate live in
+                  service.py, beside the publish act they guard
   batches.py      batches: submissions as governed records — member
                   order, terminal states, the next-act derivation
   exports.py      audit exports: the hash chain over a scope's
@@ -732,7 +767,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (102 cases)
+evals/            the scripted-task gate (107 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -740,9 +775,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 394 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 412 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 102/102 cases: happy paths diffed exactly (including
+make evals   # 107/107 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -781,7 +816,18 @@ make evals   # 102/102 cases: happy paths diffed exactly (including
              # instantiation, an operator refused at publish, a
              # policy-breaking slot value refused in policy's own
              # words, and every template's pinned examples green
-             # — and batch work: a mixed submission (a clean
+             # — and the template regression gate: a bare publish
+             # leaving the seeded default in place until the
+             # candidate is evaluated (by another hand than the
+             # publisher's) and promoted (by a supervisor who is
+             # not the publisher), a failing candidate refused
+             # with its example named, a regressing candidate
+             # refused with both standing scenarios named, bytes
+             # changed after evaluation refused on the hash, a
+             # brand-new template serving no name-only caller
+             # until one is promoted, and rollback restoring the
+             # seeded default — and batch work: a mixed submission
+             # (a clean
              # credit, an over-cap refusal kept with its reason,
              # a template member, a multi-record member) whose
              # run sheet names each member's next act, completed
