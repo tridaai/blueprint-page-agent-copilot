@@ -659,6 +659,63 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   task text, a named record field, or the recorded answer,
   with the CREATE step's fixed `issued` literal the one stated
   exception.
+- **Observability** (`observability.py`, `service.py`) — three
+  reads folded from the records, in the discipline the
+  operator report and batch report set: computed at the
+  moment of asking, from the records and nothing else, so
+  none of them can drift from what it summarises. The
+  **execution trace** (`GET /api/tasks/{id}/trace`, the
+  console's task view) reconstructs one task's timeline from
+  its attempt records: the attempts in number order — driver,
+  executor, mode, the budget each ran under — each rendered
+  as events, the attempt's navigations placed before the
+  steps they precede and its steps carrying their recorded
+  before/after values and the driver's words. Durations are
+  the attempt's wall clock, read from the started/finished
+  stamps the attempt record itself carries; per-step
+  durations are absent, stated plainly: neither driver
+  records when a step started or landed, so the trace shows
+  no per-step timing rather than fabricating one. The
+  **failure taxonomy** is ONE function
+  (`classify_ending`) with a documented rule order, first
+  match wins: verified; `clarification_exhausted` ahead of
+  the general refusal (a task refused for the questions it
+  took is a different ending from one refused for what it
+  asked); `refused_at_plan` with the governing code off the
+  trail's `plan_refused` entry; `discrepancy` and
+  `discrepancy_accepted`, their differences read from the
+  stored report (the diffs verbatim, the failed linkage
+  checks named separately); `stale` with the moved records;
+  `execution_failed` with a subreason — `budget_exhausted`
+  when the final attempt carries the shell's own stop, else
+  `driver_error`; `abandoned`, carrying the failure it
+  closed and the recorded reason; `rejected`; and
+  `in_progress` for a task that has not ended. The label
+  rides the task list and detail reads as a derived
+  `ending` field — never a stored counter. Bridge protocol
+  refusals are deliberately NOT an ending class: round 12
+  leaves the attempt running when one lands, so no execution
+  ever ends by one; the digest counts them as events, which
+  is what they are. The **daily digest** folds the tasks
+  created on a date, as they stand when it is generated —
+  counts by status and taxonomy, refusals by code, the
+  credited total by the batch report's rule (VERIFIED tasks'
+  stored reports, the `amount` checks the re-read passed),
+  clarifications asked/answered/awaiting, budget
+  exhaustions, discrepancies open vs accepted, attempts and
+  steps, protocol refusals — and stores the fold as a dated
+  snapshot record (kind `digests`, the records mechanism, so
+  no migration): the snapshot exists because regeneration
+  must REPLACE the day's report and bump its version, and a
+  pure fold has nowhere to keep either fact. Generating
+  (`POST /api/digests/{day}`, the console panel, the
+  `digest` CLI verb) requires an enrolled, active operator
+  at the API; it decides nothing about any task, and —
+  following the reject/re-plan precedent — writes no audit
+  entry: the record carries its own provenance (version,
+  generated_at, generated_by). Reading a day never
+  generates it: an ungenerated day reads as absent, not as
+  zeros.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL

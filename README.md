@@ -149,6 +149,35 @@ evidence.
   named record field, or the recorded answer — and a task with
   no governed option set still refuses, because clarification
   is not a backdoor around `no_plan_derivable`.
+- **Observability** — three reads folded from the records,
+  never from counters. The **execution trace**
+  (`GET /api/tasks/{id}/trace`, and a panel in the console's
+  task view) reconstructs one task's timeline: its attempts in
+  order, each attempt's events — navigations before the steps
+  they precede, steps with their before/after values — the
+  budget the attempt ran under, and its wall clock read from
+  the attempt's own started/finished stamps. Per-step timings
+  are not shown: neither driver records when a step started
+  or landed, so the trace shows none rather than inventing
+  one. The **failure taxonomy** is one function with a
+  documented rule order that names every ending — verified,
+  refused at plan time (with the governing code),
+  clarification exhausted, discrepancy (with its differences),
+  discrepancy accepted, stale, execution failed (subreason:
+  the budget, or the driver), abandoned, rejected, or still
+  in progress — and it rides the task list and detail reads
+  as a derived `ending` field. The **daily digest**
+  (`POST /api/digests/{day}` as an enrolled, active operator;
+  `GET` to read; a console panel; a `digest` CLI verb) folds
+  the tasks created on a day, as they stand: counts by status
+  and taxonomy, the credits their verification reports prove
+  (the batch report's rule — a discrepancy contributes
+  nothing), clarifications asked and answered, budget
+  exhaustions, discrepancies open vs accepted, and bridge
+  protocol refusals counted as the events they are (a
+  protocol refusal never ends an execution, so it is not an
+  ending class). The fold is stored as a dated snapshot;
+  regenerating a day replaces it at a bumped version.
 - **Plan amendments and diffs** — while a plan awaits confirmation,
   an operator may amend its values; every amended value passes the
   same policy checks as planning, the amendment becomes plan
@@ -586,6 +615,9 @@ src/page_agent_copilot/
   spoken.py       the spoken form: a plan rendered for the ear
                   (figures spelled, dates spoken), its hash, and
                   the transcript normaliser
+  observability.py the trace, the failure taxonomy, and the
+                  daily digest fold — pure derivations over the
+                  task, attempt, report, and audit records
   store.py        the store port: in-memory / SQLite / PostgreSQL
   records.py      the one mutation path for OrderDesk state
   dataset.py      the OrderDesk seed data (generated in code; gold
@@ -596,7 +628,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (85 cases)
+evals/            the scripted-task gate (88 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -604,9 +636,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 316 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 336 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 85/85 cases: happy paths diffed exactly (including
+make evals   # 88/88 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -718,6 +750,12 @@ make evals   # 85/85 cases: happy paths diffed exactly (including
              # question exhausting the governed patience, and
              # every clarified plan's values traced to the text,
              # a record field, or the recorded answer
+             # — and observability: a two-attempt execution's
+             # trace graded step for step, a scripted day's
+             # digest graded against a recount taken from the
+             # task records by a separate path (regeneration
+             # bumping the version), and taxonomy pins naming
+             # every ending class
 ```
 
 ## Honest status
