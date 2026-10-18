@@ -192,6 +192,11 @@ from .models import (
     VerificationReport,
     money,
 )
+from .observability import (
+    build_trace,
+    classify_ending,
+    fold_digest,
+)
 from .plandiff import diff_plans
 from .planner import (
     amend_steps,
@@ -3104,6 +3109,122 @@ class CopilotService:
                     1 for a in mine if a.budget_exhausted),
             })
         return report
+
+    # -- observability ------------------------------------------------
+    # The trace, the taxonomy, and the daily digest (round 15):
+    # three reads folded from the records by observability.py.
+    # The taxonomy label rides every task read as the derived
+    # `ending` field; the trace is one task's execution timeline
+    # reconstructed from its attempts; the digest is a dated
+    # snapshot of one day's fold, stored as a record (kind
+    # `digests`, keyed by the date — the records mechanism, so no
+    # migration) because re-generating a day must REPLACE the
+    # snapshot and bump its version: a fold alone has nowhere to
+    # keep either fact. The digest's day scope is the tasks
+    # CREATED on the date, reported as they stand when the
+    # digest is generated — a digest re-run tomorrow shows
+    # yesterday's tasks as they stand tomorrow, at a higher
+    # version, which is exactly what the version is for.
+
+    def task_ending(self, task: Task) -> dict:
+        """The taxonomy's verdict on one task, folded from its
+        trail, its attempts, and its stored verification report
+        by the one function (`observability.classify_ending`)."""
+        return classify_ending(
+            task, self.audit(task.task_id),
+            self.get_attempts(task.task_id),
+            self._stored_verification(task.task_id))
+
+    def task_view(self, task: Task) -> dict:
+        """A task as the API's list reads serve it: the record,
+        plus its ending — derived on every read, never stored,
+        so the label cannot disagree with the records."""
+        view = task.model_dump(mode="json")
+        view["ending"] = self.task_ending(task)
+        return view
+
+    def task_trace(self, task_id: str) -> dict:
+        """The task's execution trace: its attempts in order
+        with their events (steps with before/after values,
+        navigations where they happened), the budget each
+        attempt ran under, and the ending — the taxonomy's
+        verdict and the verification summary where one ran.
+        Folded from the records; asking changes nothing."""
+        task = self._require_task(task_id)
+        return build_trace(
+            task, self.get_plan(task_id),
+            self.get_attempts(task_id),
+            self._stored_verification(task_id),
+            self.task_ending(task))
+
+    @staticmethod
+    def _digest_day(day: str) -> str:
+        """Validate a digest date: an ISO calendar date, exactly
+        as written (YYYY-MM-DD). Anything else is refused — a
+        digest keyed by a date nobody can read back is worse
+        than no digest."""
+        try:
+            parsed = datetime.strptime(day, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            raise GateError(
+                f"'{day}' is not an ISO date (YYYY-MM-DD); a "
+                f"digest is keyed by the day it summarises")
+        if parsed.strftime("%Y-%m-%d") != day:
+            raise GateError(
+                f"'{day}' is not an ISO date (YYYY-MM-DD); a "
+                f"digest is keyed by the day it summarises")
+        return day
+
+    def generate_digest(self, day: str, actor: str) -> dict:
+        """Fold one day's work and store the snapshot: the
+        tasks created on `day`, as they stand now, counted by
+        ending and taxonomy, their proven credits totalled,
+        clarifications, budget exhaustions, and discrepancies
+        open vs accepted (`observability.fold_digest`). Storing
+        replaces any earlier snapshot of the day and bumps its
+        version — the snapshot is the day as reported, and a
+        re-report is a new version of it, never a quiet edit.
+        The record carries its own provenance (generated_at,
+        generated_by); generating decides nothing about any
+        task, so — like the re-plan and reject refusals — it
+        writes no audit entry."""
+        self._digest_day(day)
+        tasks = [t for t in self.list_tasks()
+                 if t.created_at[:10] == day]
+        payload = fold_digest(
+            day, tasks,
+            {t.task_id: self.get_attempts(t.task_id)
+             for t in tasks},
+            {t.task_id: self._stored_verification(t.task_id)
+             for t in tasks},
+            {t.task_id: self.audit(t.task_id) for t in tasks})
+        previous = self.store.get_record("digests", day)
+        record = {
+            "id": day, **payload,
+            "version": (int(previous.get("version", 0)) + 1
+                        if previous else 1),
+            "generated_at": _now(),
+            "generated_by": actor,
+        }
+        self.store.upsert_record("digests", record)
+        return {k: v for k, v in record.items() if k != "id"}
+
+    def get_digest(self, day: str) -> Optional[dict]:
+        """The stored digest for a day, or None when the day
+        has not been generated. Reading never generates: a day
+        nobody has summarised reads as absent, not as zeros."""
+        raw = self.store.get_record("digests", day)
+        if raw is None:
+            return None
+        return {k: v for k, v in raw.items() if k != "id"}
+
+    def list_digests(self) -> list[dict]:
+        """Every stored digest, by date."""
+        digests = []
+        for raw in self.store.list_records("digests"):
+            digests.append(
+                {k: v for k, v in raw.items() if k != "id"})
+        return sorted(digests, key=lambda d: d["date"])
 
     # -- batches -------------------------------------------------------
     def _batch_refused(self, operator: str, code: str,

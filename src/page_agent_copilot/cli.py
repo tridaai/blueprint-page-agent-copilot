@@ -1,12 +1,16 @@
-"""Command line: seed the store, or serve the console.
+"""Command line: seed the store, serve the console, or fold a
+day's operations digest.
 
     page-agent-copilot seed
     page-agent-copilot serve [--port 8000]
+    page-agent-copilot digest [--date 2026-10-18]
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+from datetime import datetime, timezone
 
 from .config import Settings
 from .service import CopilotService
@@ -20,12 +24,27 @@ def main() -> None:
     serve = sub.add_parser("serve", help="run the console + API")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--host", default="127.0.0.1")
+    digest = sub.add_parser(
+        "digest",
+        help="generate (or regenerate) one day's operations "
+             "digest and print it")
+    digest.add_argument(
+        "--date", default=None,
+        help="the day to summarise, YYYY-MM-DD (default: today, "
+             "UTC)")
     args = parser.parse_args()
 
     settings = Settings.from_env()
     if args.cmd == "seed":
         service = CopilotService(settings, build_store(settings))
         print("seeded" if service.seed() else "already seeded")
+        return
+    if args.cmd == "digest":
+        service = CopilotService(settings, build_store(settings))
+        day = args.date or datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d")
+        print(json.dumps(service.generate_digest(day, "cli"),
+                         indent=2))
         return
     if args.cmd == "serve":
         import uvicorn

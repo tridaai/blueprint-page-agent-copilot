@@ -713,6 +713,14 @@ class VerifyIn(BaseModel):
     operator: str = "operator"
 
 
+class DigestIn(BaseModel):
+    """A request to (re)generate one day's operations digest.
+    Generating is an act with an identity, like exporting: the
+    operator must be an enrolled, active directory name. The
+    day itself is the URL's ISO date."""
+    operator: str
+
+
 class AuditExportIn(BaseModel):
     """A request to export one scope's audit trail, chained.
     Exporting is a recorded act: `operator` is the exporter, who

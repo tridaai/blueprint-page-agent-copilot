@@ -661,6 +661,134 @@
     });
   }
 
+  // The execution trace (round 15): the attempts as one
+  // timeline, folded by the shell from the records — events in
+  // order (a navigation before the step it precedes, steps
+  // with their before/after values), each attempt's wall clock
+  // from its own stamps, and the ending the taxonomy names.
+  // Per-step timings are not shown: neither driver records
+  // them, so the trace invents none.
+  async function renderTrace(taskId, ending) {
+    const div = $("task-trace");
+    div.innerHTML = "";
+    const trace = await api("/api/tasks/" + taskId + "/trace");
+    if (!trace.attempts.length) return;
+    const h = document.createElement("h3");
+    h.style.marginTop = "16px";
+    h.textContent = "Execution trace";
+    div.appendChild(h);
+    if (ending) {
+      const e = document.createElement("p");
+      e.className = "note";
+      e.textContent = "Ending: " + ending.label +
+        (ending.detail && ending.detail.subreason
+          ? " (" + ending.detail.subreason + ")" : "") +
+        (ending.detail && ending.detail.code
+          ? " (" + ending.detail.code + ")" : "");
+      div.appendChild(e);
+    }
+    trace.attempts.forEach((a) => {
+      const head = document.createElement("p");
+      head.className = "note";
+      head.textContent =
+        `Attempt ${a.number} (${a.mode}) · ${a.driver} · ` +
+        `${a.outcome} · ` +
+        (a.duration_seconds != null
+          ? `${a.duration_seconds}s wall clock`
+          : "still running") +
+        ` · steps ${a.budget.steps_consumed}` +
+        (a.budget.step_ceiling
+          ? ` of ceiling ${a.budget.step_ceiling}` : "") +
+        (a.budget.budget_exhausted ? " · BUDGET EXHAUSTED" : "");
+      div.appendChild(head);
+      const lines = a.events.map((ev) =>
+        ev.type === "navigation"
+          ? `↪ before step ${ev.seq}: navigated ` +
+            `${ev.from_page} → ${ev.to_page}`
+          : ev.ok
+            ? `✓ step ${ev.seq}: ${ev.detail} ` +
+              `[${JSON.stringify(ev.before)} → ` +
+              `${JSON.stringify(ev.after)}]`
+            : `✗ step ${ev.seq}: FAILED — ${ev.detail}`);
+      const pre = document.createElement("div");
+      pre.className = "diff";
+      pre.textContent = lines.join("\n");
+      div.appendChild(pre);
+    });
+    if (trace.verification) {
+      const v = document.createElement("p");
+      v.className = "note";
+      v.textContent =
+        `Verification: ${trace.verification.ok
+          ? "passed" : "FAILED"} — ` +
+        `${trace.verification.checked} fields checked against ` +
+        `plan v${trace.verification.plan_version}.`;
+      div.appendChild(v);
+    }
+  }
+
+  // The daily digest (round 15): the stored snapshots by date,
+  // and the fold for the picked day. Generating acts as the
+  // operator named at the top of this screen and replaces the
+  // day's snapshot at a bumped version.
+  function renderDigest(d) {
+    const counts = (obj) => Object.entries(obj || {})
+      .map(([k, v]) => `${k} ${v}`).join(", ") || "none";
+    $("digest-view").textContent = [
+      `${d.date} · digest v${d.version} · generated ` +
+        `${d.generated_at} by ${d.generated_by}`,
+      `tasks: ${d.tasks_total} — by status: ` +
+        counts(d.counts_by_status),
+      `by taxonomy: ` + counts(d.counts_by_taxonomy),
+      `refusals by code: ` + counts(d.refusals_by_code),
+      `credited (proven by verification reports): ` +
+        `${d.total_credited}`,
+      `clarifications: asked ${d.clarifications.asked}, ` +
+        `answered ${d.clarifications.answered}, awaiting ` +
+        `${d.clarifications.awaiting}`,
+      `budget exhaustions: ${d.budget_exhaustions.count}` +
+        (d.budget_exhaustions.task_ids.length
+          ? ` (${d.budget_exhaustions.task_ids.join(", ")})` : ""),
+      `discrepancies open: ` +
+        `${d.discrepancies.open.length}` +
+        (d.discrepancies.open.length
+          ? ` (${d.discrepancies.open.join(", ")})` : "") +
+        ` · accepted: ${d.discrepancies.accepted.length}`,
+      `executions: ${d.executions.attempts_run} attempts, ` +
+        `${d.executions.steps_consumed} steps consumed`,
+      `bridge protocol refusals: ${d.protocol_refusals}`,
+    ].join("\n");
+  }
+
+  async function refreshDigests() {
+    const list = await api("/api/digests");
+    $("digest-list").textContent = list.length
+      ? "Stored digests: " + list.map((d) =>
+          `${d.date} (v${d.version})`).join(" · ")
+      : "No digests stored yet.";
+    if (list.length) renderDigest(list[list.length - 1]);
+  }
+
+  $("digest-generate").addEventListener("click", async () => {
+    const day = $("digest-date").value;
+    if (!day) {
+      $("digest-note").textContent = "Pick a day first.";
+      return;
+    }
+    const res = await fetch("/api/digests/" + day, json("POST", {
+      operator: $("task-operator").value || "operator" }));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("digest-note").textContent =
+        "Refused: " + (data.detail || `-> ${res.status}`);
+      return;
+    }
+    $("digest-note").textContent =
+      `Digest for ${day} stored at v${data.version}.`;
+    renderDigest(data);
+    refreshDigests();
+  });
+
   // The plan in its spoken form (round 13): rendered by the
   // shell from the stored plan — steps in order, figures
   // spelled, dates spoken. When the task's operator prefers
@@ -908,6 +1036,7 @@
     $("task-recovery").hidden = task.status !== "EXECUTION_FAILED";
     $("recovery-note").textContent = "";
     renderAttempts(attempts);
+    renderTrace(taskId, detail.ending);
     renderVerification(task, verification);
     const audit = await api("/api/tasks/" + taskId + "/audit");
     $("task-audit").textContent = audit.map((a) =>
@@ -1066,7 +1195,7 @@
                        refreshInvoices(), refreshTasks(),
                        refreshRoles(), refreshOrphaned(),
                        refreshReport(), refreshTemplates(),
-                       refreshBatches()]);
+                       refreshBatches(), refreshDigests()]);
   }
   refreshAll();
 

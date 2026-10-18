@@ -237,6 +237,24 @@
         stopped at the governed ceilings.</p>
       <div id="operator-budget" class="diff" style="margin-top:8px;"></div>
     </div>
+    <div class="panel">
+      <h3>Daily operations digest</h3>
+      <p class="note">One day's work, folded from the records and stored as a dated
+        snapshot: the tasks that arrived that day, as they stand — counted by ending and
+        by the failure taxonomy, the credits their verification reports prove,
+        clarifications asked and answered, budget exhaustions, and discrepancies open
+        vs accepted. Generating replaces the day's snapshot at a bumped version; the
+        fold itself is recomputed from the records every time, so a digest can never
+        drift from what it summarises. Generating acts as the operator named at the
+        top of this screen, and that name must be enrolled and active.</p>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <div class="field"><label for="digest-date">Day</label><input id="digest-date" type="date"></div>
+        <button class="act secondary" id="digest-generate">Generate / refresh digest</button>
+        <span class="note" id="digest-note"></span>
+      </div>
+      <div id="digest-list" class="note" style="margin-top:8px;"></div>
+      <div id="digest-view" class="diff" style="margin-top:8px;"></div>
+    </div>
     <div class="panel" id="task-detail" hidden>
       <h3>Task <span id="task-id-label"></span> — <span id="task-status-chip"></span></h3>
       <div id="task-refusal" class="err"></div>
@@ -325,6 +343,7 @@
         <span class="note" id="recovery-note"></span>
       </div>
       <div id="task-attempts"></div>
+      <div id="task-trace"></div>
       <div id="task-verification"></div>
       <h3 style="margin-top:16px;">Audit trail</h3>
       <div class="audit" id="task-audit"></div>

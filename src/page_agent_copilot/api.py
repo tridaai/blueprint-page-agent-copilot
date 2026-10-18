@@ -34,6 +34,7 @@ from .models import (
     ConsoleSaveIn,
     CorrectiveIn,
     DirectoryActIn,
+    DigestIn,
     EnrollOperatorIn,
     ExecuteIn,
     PickupIn,
@@ -274,7 +275,10 @@ def create_app(settings: Optional[Settings] = None,
 
     @app.get("/api/tasks")
     def tasks():
-        return [t.model_dump(mode="json") for t in service.list_tasks()]
+        # Each task carries its ending: the failure taxonomy's
+        # verdict, folded from the task's records on every read
+        # (round 15) — a derived field, never a stored counter.
+        return [service.task_view(t) for t in service.list_tasks()]
 
     @app.get("/api/tasks/{task_id}")
     def task_detail(task_id: str):
@@ -284,6 +288,7 @@ def create_app(settings: Optional[Settings] = None,
         plan = service.get_plan(task_id)
         report = service.get_verification(task_id)
         detail = {"task": task.model_dump(mode="json"),
+                  "ending": service.task_ending(task),
                   "plan": _plan_json(plan),
                   "plan_versions": [p.version
                                     for p in service.list_plans(task_id)],
@@ -449,6 +454,19 @@ def create_app(settings: Optional[Settings] = None,
             raise KeyError(f"task {task_id} does not exist")
         return [a.model_dump(mode="json")
                 for a in service.get_attempts(task_id)]
+
+    @app.get("/api/tasks/{task_id}/trace")
+    def trace(task_id: str):
+        # The execution trace (round 15): the task's attempts
+        # as one timeline — events in order (navigations before
+        # the steps they precede, steps with their before/after
+        # values), each attempt's wall clock from its own
+        # stamps, and the ending. A fold over the records;
+        # asking changes nothing. Per-step timings are not
+        # shown: neither driver records them.
+        if service.get_task(task_id) is None:
+            raise KeyError(f"task {task_id} does not exist")
+        return service.task_trace(task_id)
 
     @app.post("/api/tasks/{task_id}/resume")
     def resume(task_id: str, body: ResumeIn):
@@ -621,6 +639,35 @@ def create_app(settings: Optional[Settings] = None,
         # every act's actor must resolve to a directory name or
         # a named system component. Zero problems is the grade.
         return service.attribution_check()
+
+    # -- the daily digest (round 15) -----------------------------------
+    # One day's work, folded and stored as a dated snapshot:
+    # the tasks created that day as they stand, counted by
+    # ending and taxonomy, their proven credits totalled,
+    # clarifications, budget exhaustions, discrepancies open
+    # vs accepted. Generating is an act with an identity — an
+    # enrolled, active operator — and replaces the day's
+    # snapshot at a bumped version; reading never generates.
+    @app.post("/api/digests/{day}")
+    def generate_digest(day: str, body: DigestIn):
+        entry = service.directory_entry(body.operator)
+        if entry is None or not service.entry_active(entry):
+            raise GateError(
+                f"generating a digest is refused: "
+                f"'{body.operator}' is not an enrolled, active "
+                f"operator")
+        return service.generate_digest(day, body.operator)
+
+    @app.get("/api/digests/{day}")
+    def digest(day: str):
+        found = service.get_digest(day)
+        if found is None:
+            raise KeyError(f"no digest stored for {day}")
+        return found
+
+    @app.get("/api/digests")
+    def digests():
+        return service.list_digests()
 
     # -- the task library ---------------------------------------------
     # Templates are governed records: listed and read here with
