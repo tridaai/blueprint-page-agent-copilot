@@ -1699,7 +1699,16 @@ class CopilotService:
                 step_ceiling=self.settings.policy
                 .max_execution_steps,
                 seconds_ceiling=self.settings.policy
-                .max_execution_seconds)
+                .max_execution_seconds,
+                # The deployment, snapshotted the same way: the
+                # profile this attempt runs under — its name,
+                # how the bundle was delivered, where the model
+                # lives, and the model name. Never the key.
+                deployment_profile=self.settings.profile.name,
+                bundle_delivery=self.settings.profile.delivery,
+                endpoint_class=self.settings.profile
+                .endpoint_class,
+                model=self.settings.page_agent.model)
             self._store_attempt(attempt)
             task.attempts = number
             task.failed_step = None

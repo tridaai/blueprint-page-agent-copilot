@@ -72,9 +72,14 @@ def test_refusal_over_http(client):
 
 def test_agent_config_shape(client):
     cfg = client.get("/api/agent-config").json()
-    # The library's own field names (page-agent@1.12.4 LLMConfig).
+    # The library's own field names (page-agent@1.12.4 LLMConfig),
+    # plus the deployment profile the read carries since round 16
+    # (profile, delivery, endpointClass, bundleURL, csp) — added
+    # fields only; the library fields are untouched.
     assert set(cfg) == {"model", "baseURL", "apiKey", "language",
-                        "maxSteps", "configured"}
+                        "maxSteps", "configured",
+                        "profile", "delivery", "endpointClass",
+                        "bundleURL", "csp"}
 
 
 def test_console_save_refuses_payment_field(client):

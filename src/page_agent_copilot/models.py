@@ -383,6 +383,15 @@ class ExecutionAttempt(BaseModel):
     is set and `exhaustion_reason` names which ceiling, with the
     counts. Attempts from before the budget round carry 0
     ceilings and no exhaustion — they ran before budgets existed.
+
+    The attempt also records the deployment it ran under (round
+    16): the profile's name, its bundle delivery, its endpoint
+    class, and the configured model name — snapshotted at claim
+    time like the budget, so the audit answers "which deployment
+    ran this task" even after the deployment changes. The API key
+    is never part of it. Attempts from before the profile round
+    carry empty fields — their deployment is unknown, stated by
+    the emptiness, never backfilled with a guess.
     """
 
     task_id: str
@@ -418,6 +427,14 @@ class ExecutionAttempt(BaseModel):
     seconds_ceiling: int = 0
     budget_exhausted: bool = False
     exhaustion_reason: Optional[str] = None
+    # The deployment this attempt ran under, snapshotted from
+    # Settings at claim time (round 16): profile name, bundle
+    # delivery, endpoint class, model name — never the key.
+    # Empty on attempts from before profiles existed.
+    deployment_profile: str = ""
+    bundle_delivery: str = ""
+    endpoint_class: str = ""
+    model: str = ""
 
 
 class FieldDiff(BaseModel):

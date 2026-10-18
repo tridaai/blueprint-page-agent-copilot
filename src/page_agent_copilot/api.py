@@ -87,6 +87,12 @@ def create_app(settings: Optional[Settings] = None,
                seed: bool = False) -> FastAPI:
     setup_logging()
     settings = settings or Settings.from_env()
+    # The deployment profile is validated before anything serves:
+    # a misconfigured deployment (a CDN pin that is not the
+    # bundled version, a hosted endpoint with no key) fails loud
+    # at startup, with the reason named — never as a quietly
+    # different agent in the page.
+    settings.validate()
     store = store or build_store(settings)
     reads = ConsoleReads(store)
     service = CopilotService(settings, store)
@@ -102,6 +108,14 @@ def create_app(settings: Optional[Settings] = None,
         rid = new_request_id()
         response = await call_next(request)
         response.headers["X-Request-ID"] = rid
+        # The Content-Security-Policy is the deployment profile's,
+        # computed from it in config.py: the script origins are
+        # the bundle's home (and, for a CDN profile, exactly the
+        # pinned CDN's origin), and connect-src names the model
+        # endpoint the in-page agent calls.
+        response.headers["Content-Security-Policy"] = (
+            settings.profile.content_security_policy(
+                settings.page_agent))
         log.info("%s %s -> %s", request.method, request.url.path,
                  response.status_code)
         return response
@@ -166,6 +180,7 @@ def create_app(settings: Optional[Settings] = None,
                              "credit_memos")
             },
             "page_agent_configured": settings.page_agent.configured,
+            "profile": settings.profile.name,
             "default_driver": "offline",
         }
 
@@ -828,8 +843,18 @@ def create_app(settings: Optional[Settings] = None,
         execution-step ceiling (Policy) served under the library's
         name — one source of truth for the number, so the in-page
         agent's own step budget and the shell's per-attempt budget
-        are the same figure, set in one place."""
+        are the same figure, set in one place.
+
+        The deployment profile rides along (round 16): its name,
+        how the bundle is delivered and from where (`bundleURL` —
+        the script the page loaded, or will load), where the
+        model lives (`endpointClass`), and the
+        Content-Security-Policy the app serves for this profile —
+        so the console can state the deployment it is running
+        under, and the audit's per-attempt profile has a served
+        counterpart to check against."""
         cfg = settings.page_agent
+        profile = settings.profile
         return {
             "model": cfg.model,
             "baseURL": cfg.base_url,
@@ -837,12 +862,25 @@ def create_app(settings: Optional[Settings] = None,
             "language": cfg.language,
             "maxSteps": settings.policy.max_execution_steps,
             "configured": cfg.configured,
+            "profile": profile.name,
+            "delivery": profile.delivery,
+            "endpointClass": profile.endpoint_class,
+            "bundleURL": profile.bundle_url,
+            "csp": profile.content_security_policy(cfg),
         }
 
     # -- the console page ---------------------------------------------------
     @app.get("/", response_class=HTMLResponse)
     def console():
-        return (STATIC_DIR / "orderdesk.html").read_text()
+        html = (STATIC_DIR / "orderdesk.html").read_text()
+        # The page loads the agent bundle from the deployment
+        # profile's source: the committed bundle by default, or
+        # the profile's pinned CDN URL instead — the substitution
+        # is the profile's one effect on the page's markup, and
+        # for the local profile it changes nothing.
+        return html.replace(
+            'src="/static/vendor/page-agent.bundle.js"',
+            f'src="{settings.profile.bundle_url}"')
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app

@@ -1190,6 +1190,29 @@
     refreshTasks(); openTask(current.task.task_id);
   });
 
+  // The deployment line in the footer: the profile this console
+  // is running under — how the agent bundle was delivered, where
+  // the model lives — and the Content-Security-Policy the shell
+  // serves for it. Read from /api/agent-config, the same served
+  // config the bridge constructs the agent from, so what the
+  // footer states is what the page is actually running.
+  async function refreshDeployment() {
+    try {
+      const cfg = await api("/api/agent-config");
+      const where = cfg.endpointClass === "self_hosted"
+        ? "self-hosted model" : "hosted model";
+      const model = cfg.configured
+        ? `${cfg.model} at ${cfg.baseURL}` : "not configured";
+      $("deployment-line").textContent =
+        `Deployment profile: ${cfg.profile} — ${cfg.delivery} ` +
+        `bundle (${cfg.bundleURL}), ${where}: ${model}. ` +
+        `CSP: ${cfg.csp}`;
+    } catch (err) {
+      $("deployment-line").textContent =
+        "Deployment profile: unavailable (" + err.message + ")";
+    }
+  }
+
   async function refreshAll() {
     await Promise.all([refreshOrders(), refreshCustomers(),
                        refreshInvoices(), refreshTasks(),
@@ -1198,6 +1221,7 @@
                        refreshBatches(), refreshDigests()]);
   }
   refreshAll();
+  refreshDeployment();
 
   window.OrderDesk = {
     showScreen, openOrder, openCustomer, openInvoice, openTask,
