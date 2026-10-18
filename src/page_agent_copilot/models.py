@@ -465,6 +465,48 @@ class ConfirmIn(BaseModel):
     operator: str
 
 
+class TranscriptIntakeIn(BaseModel):
+    """A task stated by voice, as the deployment's recogniser
+    transcribed it: speaker labels, timestamp markers, line
+    breaks and all. The shell normalises the envelope
+    (`spoken.normalize_transcript`) and the ordinary grammar
+    plans from the cleaned text — the transcript is a door into
+    intake, not a second planner."""
+    text: str
+    operator: str = "operator"
+
+
+class ReadbackIn(BaseModel):
+    """Ask for a read-back of a plan: the shell renders the
+    plan's spoken form and issues the token that binds a
+    confirmation to the words the operator hears. The asker is
+    the would-be confirmer — the token is issued to the person
+    who hears the plan, and only that person can spend it."""
+    operator: str
+
+
+class ConfirmReadbackIn(BaseModel):
+    """Confirm a plan by read-back: the token issued when the
+    plan was read aloud, presented by the operator it was
+    issued to. Every ordinary confirmation rule still applies;
+    the token adds the binding that the plan confirmed is the
+    plan that was heard, at the version that was heard."""
+    operator: str
+    token: str
+
+
+class PreferenceIn(BaseModel):
+    """Set an operator's spoken-form preference. A recorded
+    supervisor act, like the other directory acts: `operator`
+    is the acting supervisor; `prefers_spoken` is the new
+    value of the flag on the named operator's entry. The flag
+    is presentation only — the console leads with the spoken
+    form and offers the read-back route — and changes no
+    permission."""
+    operator: str
+    prefers_spoken: bool
+
+
 class AmendChangeIn(BaseModel):
     """One amendment to one plan step, addressed by step seq.
 

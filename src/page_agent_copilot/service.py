@@ -124,6 +124,30 @@ every act they name is then taken on the member task itself,
 through the ordinary doors. Members share nothing but the
 batch id — one member's staleness, failure, or discrepancy
 never touches another's lifecycle.
+
+Accessibility (spoken.py, round 13) is a view and a door, never
+a second shell. The *spoken form* of a plan is rendered in code
+from the stored plan — steps in order, figures spelled, dates
+spoken — and is never stored: asking for it changes nothing,
+and its hash is taken over the rendering. Confirmation gains a
+second path on top of the same checks: a *read-back*, where
+the shell issues a token bound to the task, the plan version,
+the spoken form's hash, and the operator it was issued to, and
+confirming presents that token — an amendment after the
+read-back moves the version and changes the words, so the old
+token refuses as stale and the confirmer must hear the version
+they approve; the act lands as `plan_confirmed` with
+`method: readback`. Intake gains a transcript door: the
+envelope a recogniser wraps a dictation in (speaker labels,
+timestamps, line breaks) is normalised in code, and the
+cleaned text goes through the ordinary intake — numbers are
+never converted from words, because a converter guessing at
+an id could plan against the wrong record. And the directory
+entry gains a *preference* (`prefers_spoken`), set by a
+recorded supervisor act like the other directory acts: the
+console leads with the spoken form and offers the read-back
+route. Presentation only — it grants no action class, widens
+no allowlist, and skips no check.
 """
 
 from __future__ import annotations
@@ -179,6 +203,7 @@ from .planner import (
 )
 from .policy import PlanRefusal
 from .reads import ConsoleReads
+from .spoken import normalize_transcript, spoken_hash, spoken_plan
 from .roles import (
     DEFAULT_OPERATORS,
     DEFAULT_ROLES,
@@ -343,6 +368,15 @@ class CopilotService:
         before the directory round carry no flag; an absent flag
         reads as active, and every write since carries it."""
         return bool(entry.get("active", True))
+
+    @staticmethod
+    def entry_prefers_spoken(entry: dict) -> bool:
+        """Whether a directory entry asks for the spoken form
+        (round 13): the console leads with it and offers the
+        read-back confirmation route. A preference, not a
+        permission — absent reads as False, like `active`
+        reads as True."""
+        return bool(entry.get("prefers_spoken", False))
 
     def role_of(self, operator: str) -> Optional[RoleDefinition]:
         """The role an operator name holds, or None: an unknown
@@ -561,6 +595,36 @@ class CopilotService:
                     "operator_reactivated", {
                         "operator": entry["id"],
                         "role": entry["role"]})
+        return updated
+
+    def set_operator_preference(self, actor: str, name: str,
+                                prefers_spoken: bool) -> dict:
+        """Set an operator's spoken-form preference (round 13) —
+        a recorded supervisor act in the roles scope, like the
+        other directory acts. The flag is presentation only:
+        the console leads with the plan's spoken form for that
+        operator and offers the read-back confirmation route.
+        It grants no action class, widens no allowlist, and
+        skips no check — setting it changes how the shell
+        presents, never what it permits. Setting the value the
+        entry already carries changes nothing and is refused."""
+        self._directory_actor(actor, "preference change", name)
+        entry = self._directory_target(actor, "preference change",
+                                       name)
+        if self.entry_prefers_spoken(entry) == bool(prefers_spoken):
+            self._directory_refused(
+                actor, "preference change", entry["id"],
+                "no_change",
+                f"'{entry['id']}' already carries prefers_spoken "
+                f"= {bool(prefers_spoken)}; the change alters "
+                f"nothing")
+        updated = {**entry,
+                   "prefers_spoken": bool(prefers_spoken)}
+        self.store.upsert_record("operators", updated)
+        self._audit(ROLE_AUDIT_SCOPE, actor,
+                    "operator_preference_changed", {
+                        "operator": entry["id"],
+                        "prefers_spoken": bool(prefers_spoken)})
         return updated
 
     # -- the task library ---------------------------------------------
@@ -903,6 +967,26 @@ class CopilotService:
             "summary": plan.summary, "steps": len(plan.steps)})
         return task
 
+    def intake_transcript(self, text: str, operator: str) -> Task:
+        """A task stated by voice, as transcribed (round 13):
+        the transcript's envelope — speaker labels, timestamp
+        markers, line breaks — is normalised in code, and the
+        cleaned text goes through the ordinary `intake`, so the
+        plan a transcript produces is the plan the same words
+        typed produce, under the same identity, role, and
+        policy checks. The task's text is the normalised
+        statement; the raw transcript rides the task's trail
+        (`transcript_intake`, with both forms) so what was
+        actually dictated stays attributable. Numbers are not
+        converted: ids and amounts must arrive as digits (see
+        spoken.py) — a transcript whose figures are words is
+        refused by the grammar like any underivable text."""
+        normalized = normalize_transcript(text)
+        task = self.intake(normalized, operator)
+        self._audit(task.task_id, operator, "transcript_intake", {
+            "raw": str(text), "normalized": normalized})
+        return task
+
     # -- reads ----------------------------------------------------------
     def get_task(self, task_id: str) -> Optional[Task]:
         raw = self.store.get_task(task_id)
@@ -1125,64 +1209,222 @@ class CopilotService:
         return task
 
     # -- the gate ---------------------------------------------------------
-    def confirm(self, task_id: str, operator: str) -> Task:
-        task = self._require_task(task_id)
+    def _check_confirmer(self, task: Task, operator: str) -> None:
+        """The confirmation gate's identity checks, shared by
+        both confirmation paths (the console's confirm and the
+        read-back confirm, round 13): the task must be PLANNED;
+        the confirmer must be enrolled and active, hold a
+        confirm-capable role, and not be the planner —
+        self-confirmation is refused for every role (names
+        compare normalised, so a spacing or casing variant of
+        the planner's name is still the planner). Every refusal
+        is recorded before it raises — including the deactivated
+        confirmer's: a name that may perform no act is refused
+        as itself, not as a stranger."""
         if task.status != TaskStatus.PLANNED:
             raise GateError(
-                f"task {task_id} is {task.status.value}; only a PLANNED "
-                f"task can be confirmed")
-        # The confirmer must hold a confirm-capable role, and must
-        # not be the planner: self-confirmation is refused for
-        # every role (names compare normalised, so a spacing or
-        # casing variant of the planner's name is still the
-        # planner). Every refusal is recorded before it raises —
-        # including the deactivated confirmer's: a name that may
-        # perform no act is refused as itself, not as a stranger.
+                f"task {task.task_id} is {task.status.value}; only "
+                f"a PLANNED task can be confirmed")
         entry = self.directory_entry(operator)
         if entry is not None and not self.entry_active(entry):
-            self._audit(task_id, operator, "confirmation_refused", {
-                "code": "operator_inactive",
-                "reason": f"'{operator}' is deactivated; a "
-                          f"deactivated operator may not "
-                          f"confirm plans",
-                "planner": task.operator,
-                "plan_version": task.plan_version})
+            self._audit(task.task_id, operator,
+                        "confirmation_refused", {
+                            "code": "operator_inactive",
+                            "reason": f"'{operator}' is deactivated; "
+                                      f"a deactivated operator may "
+                                      f"not confirm plans",
+                            "planner": task.operator,
+                            "plan_version": task.plan_version})
             raise GateError(
-                f"confirmation of task {task_id} refused: "
+                f"confirmation of task {task.task_id} refused: "
                 f"'{operator}' is deactivated (operator_inactive)")
         role = self.role_of(operator)
         if role is None or not role.can_confirm:
             code = ("unknown_operator" if role is None
                     else "role_cannot_confirm")
             reason = (f"'{operator}' holds no role" if role is None
-                      else f"role '{role.name}' may not confirm plans")
-            self._audit(task_id, operator, "confirmation_refused", {
-                "code": code, "reason": reason,
-                "planner": task.operator,
-                "plan_version": task.plan_version})
+                      else f"role '{role.name}' may not confirm "
+                            f"plans")
+            self._audit(task.task_id, operator,
+                        "confirmation_refused", {
+                            "code": code, "reason": reason,
+                            "planner": task.operator,
+                            "plan_version": task.plan_version})
             raise GateError(
-                f"confirmation of task {task_id} refused: {reason}")
+                f"confirmation of task {task.task_id} refused: "
+                f"{reason}")
         if operator_named(operator) == operator_named(task.operator):
-            self._audit(task_id, operator, "confirmation_refused", {
-                "code": "self_confirmation",
-                "reason": "the planner may not confirm their own plan",
-                "planner": task.operator,
-                "plan_version": task.plan_version})
+            self._audit(task.task_id, operator,
+                        "confirmation_refused", {
+                            "code": "self_confirmation",
+                            "reason": "the planner may not confirm "
+                                      "their own plan",
+                            "planner": task.operator,
+                            "plan_version": task.plan_version})
             raise GateError(
-                f"confirmation of task {task_id} refused: "
+                f"confirmation of task {task.task_id} refused: "
                 f"'{operator}' planned this task; a plan is "
                 f"confirmed by a second person, never its planner")
+
+    def _finalize_confirmation(self, task: Task, operator: str,
+                               extra: Optional[dict] = None) -> Task:
+        """Land a confirmation that has passed every check: the
+        state moves, and the confirmation binds this exact plan
+        version — execution loads it by number, so nothing that
+        happens to the plan store afterwards can widen what the
+        human approved. `extra` carries the read-back path's
+        binding (its method, the spoken hash, the token) into
+        the same `plan_confirmed` entry, so the trail shows how
+        the plan was confirmed, not only that it was."""
         task.status = TaskStatus.CONFIRMED
         task.confirmed_by = operator
-        # The confirmation binds this exact version. Execution loads
-        # it by number, so nothing that happens to the plan store
-        # afterwards can widen what the human approved.
         task.confirmed_version = task.plan_version
         self._save(task)
-        self._audit(task_id, operator, "plan_confirmed", {
-            "plan_version": task.plan_version,
-            "confirmed_version": task.confirmed_version})
+        detail = {"plan_version": task.plan_version,
+                  "confirmed_version": task.confirmed_version}
+        if extra:
+            detail.update(extra)
+        self._audit(task.task_id, operator, "plan_confirmed", detail)
         return task
+
+    def confirm(self, task_id: str, operator: str) -> Task:
+        task = self._require_task(task_id)
+        self._check_confirmer(task, operator)
+        return self._finalize_confirmation(task, operator)
+
+    # -- accessibility: the spoken form and read-back confirmation -------
+    # Round 13. The spoken form is a view of the stored plan
+    # (spoken.py), rendered in code at the moment of asking; the
+    # read-back path is the same gate with one binding added:
+    # the confirmer presents the token the shell issued when the
+    # plan was read to them, bound to the task, the plan version,
+    # the spoken form's hash, and the person it was issued to.
+    # Amend the plan after the read-back and the version moves,
+    # the words change, and the token can no longer confirm —
+    # the confirmer must hear the version they approve.
+
+    def spoken_view(self, task_id: str,
+                    version: Optional[int] = None) -> dict:
+        """The current plan (or a named version) in its spoken
+        form, with the hash read-backs bind to. A read: asking
+        stores nothing and changes nothing."""
+        task = self._require_task(task_id)
+        plan = self.get_plan(task_id, version)
+        if plan is None:
+            raise GateError(
+                f"task {task_id} has no plan to read aloud"
+                + (f" at version {version}" if version else ""))
+        return {
+            "task_id": task_id,
+            "plan_version": plan.version,
+            "pages": plan.pages,
+            "multi_page": plan.is_multi_page,
+            "spoken": spoken_plan(plan),
+            "spoken_hash": spoken_hash(plan),
+        }
+
+    def issue_readback(self, task_id: str, operator: str) -> dict:
+        """Issue a read-back token for a PLANNED task's current
+        plan version: the spoken form is rendered, and the token
+        record binds (task, plan version, spoken hash, the
+        operator it is issued to). The asker must be an
+        enrolled, active operator — a name that may perform no
+        act cannot be handed a confirmation token; the refusal
+        is recorded (`readback_refused`) before it raises, like
+        the other identity refusals."""
+        task = self._require_task(task_id)
+        if task.status != TaskStatus.PLANNED:
+            raise GateError(
+                f"task {task_id} is {task.status.value}; only a "
+                f"PLANNED task's plan can be read back for "
+                f"confirmation")
+        entry = self.directory_entry(operator)
+        if entry is None or not self.entry_active(entry):
+            code = ("unknown_operator" if entry is None
+                    else "operator_inactive")
+            reason = (f"'{operator}' holds no role in the "
+                      f"operator directory"
+                      if entry is None else
+                      f"'{operator}' is deactivated "
+                      f"(operator_inactive); a deactivated "
+                      f"operator may not confirm plans")
+            self._audit(task_id, operator, "readback_refused", {
+                "code": code, "reason": reason,
+                "plan_version": task.plan_version})
+            raise GateError(
+                f"read-back for task {task_id} refused: {reason}")
+        view = self.spoken_view(task_id)
+        token = uuid.uuid4().hex
+        self.store.upsert_record("readbacks", {
+            "id": token, "task_id": task_id,
+            "plan_version": view["plan_version"],
+            "spoken_hash": view["spoken_hash"],
+            "issued_to": entry["id"], "issued_at": _now(),
+            "used_at": ""})
+        self._audit(task_id, operator, "readback_issued", {
+            "plan_version": view["plan_version"],
+            "spoken_hash": view["spoken_hash"],
+            "issued_to": entry["id"]})
+        return {"token": token, **view, "issued_to": entry["id"]}
+
+    def _readback_refused(self, task: Task, operator: str,
+                          code: str, reason: str) -> None:
+        self._audit(task.task_id, operator,
+                    "confirmation_refused", {
+                        "code": code, "reason": reason,
+                        "method": "readback",
+                        "planner": task.operator,
+                        "plan_version": task.plan_version})
+        raise GateError(
+            f"confirmation of task {task.task_id} refused: {reason}")
+
+    def confirm_readback(self, task_id: str, operator: str,
+                         token: str) -> Task:
+        """Confirm by read-back: every ordinary confirmation
+        rule runs first, unchanged — then the token must be
+        the one this shell issued for this task, to this
+        operator, unspent, and bound to the plan version that
+        still stands. A plan amended after the read-back has a
+        new version and new spoken words, so the old token
+        refuses as `readback_stale`, naming both versions: the
+        confirmer must hear the plan they approve."""
+        task = self._require_task(task_id)
+        self._check_confirmer(task, operator)
+        record = self.store.get_record("readbacks", token or "")
+        if record is None or record.get("task_id") != task_id:
+            self._readback_refused(
+                task, operator, "readback_unknown",
+                "the read-back token was not issued for this "
+                "task; ask for a fresh read-back of the plan")
+        if operator_named(record.get("issued_to", "")) \
+                != operator_named(operator):
+            self._readback_refused(
+                task, operator, "readback_operator_mismatch",
+                f"the read-back was issued to "
+                f"'{record.get('issued_to')}'; the operator who "
+                f"heard the plan is the operator who confirms it")
+        if record.get("used_at"):
+            self._readback_refused(
+                task, operator, "readback_used",
+                "the read-back token has already been spent; "
+                "ask for a fresh read-back of the plan")
+        plan = self.get_plan(task_id)
+        assert plan is not None
+        if record.get("plan_version") != task.plan_version \
+                or record.get("spoken_hash") != spoken_hash(plan):
+            self._readback_refused(
+                task, operator, "readback_stale",
+                f"the read-back was of plan "
+                f"v{record.get('plan_version')}, but the plan "
+                f"now stands at v{task.plan_version}; the words "
+                f"have changed since they were heard — hear the "
+                f"new version and confirm that")
+        record = {**record, "used_at": _now()}
+        self.store.upsert_record("readbacks", record)
+        return self._finalize_confirmation(task, operator, {
+            "method": "readback",
+            "spoken_hash": record["spoken_hash"],
+            "readback_token": record["id"]})
 
     def _bound_plan(self, task: Task) -> Plan:
         """The plan version this task's execution is bound to: the

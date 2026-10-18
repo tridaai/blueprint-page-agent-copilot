@@ -29,12 +29,15 @@ from .models import (
     AuditExportIn,
     AssignRoleIn,
     ConfirmIn,
+    ConfirmReadbackIn,
     ConsoleSaveIn,
     CorrectiveIn,
     DirectoryActIn,
     EnrollOperatorIn,
     ExecuteIn,
     PickupIn,
+    PreferenceIn,
+    ReadbackIn,
     RejectIn,
     ReplanIn,
     RestartIn,
@@ -44,6 +47,7 @@ from .models import (
     RoleUpdateIn,
     StepReportIn,
     TaskIntake,
+    TranscriptIntakeIn,
     VerifyIn,
 )
 from .policy import PlanRefusal
@@ -255,6 +259,18 @@ def create_app(settings: Optional[Settings] = None,
                 "plan": (_plan_json(service.get_plan(task.task_id))
                          if task.plan_version else None)}
 
+    @app.post("/api/tasks/transcript", status_code=201)
+    def intake_transcript(body: TranscriptIntakeIn):
+        # A task stated by voice (round 13): the transcript's
+        # envelope is normalised in the service and the cleaned
+        # text goes through the ordinary intake — same planner,
+        # same refusals; the raw transcript rides the task's
+        # trail.
+        task = service.intake_transcript(body.text, body.operator)
+        return {"task": task.model_dump(mode="json"),
+                "plan": (_plan_json(service.get_plan(task.task_id))
+                         if task.plan_version else None)}
+
     @app.get("/api/tasks")
     def tasks():
         return [t.model_dump(mode="json") for t in service.list_tasks()]
@@ -266,14 +282,56 @@ def create_app(settings: Optional[Settings] = None,
             raise KeyError(f"task {task_id} does not exist")
         plan = service.get_plan(task_id)
         report = service.get_verification(task_id)
-        return {"task": task.model_dump(mode="json"),
-                "plan": _plan_json(plan),
-                "plan_versions": [p.version
-                                  for p in service.list_plans(task_id)],
-                "attempts": [a.model_dump(mode="json")
-                             for a in service.get_attempts(task_id)],
-                "verification": (report.model_dump(mode="json")
-                                 if report else None)}
+        detail = {"task": task.model_dump(mode="json"),
+                  "plan": _plan_json(plan),
+                  "plan_versions": [p.version
+                                    for p in service.list_plans(task_id)],
+                  "attempts": [a.model_dump(mode="json")
+                               for a in service.get_attempts(task_id)],
+                  "verification": (report.model_dump(mode="json")
+                                   if report else None)}
+        # Accessibility (round 13): when the task's operator
+        # prefers the spoken form, the detail leads with it —
+        # the spoken view of the current plan rides along, so
+        # the console can put the words for the ear first. The
+        # flag is the operator's presentation preference only.
+        entry = service.directory_entry(task.operator)
+        prefers = bool(entry and service.entry_prefers_spoken(entry))
+        detail["operator_prefers_spoken"] = prefers
+        if prefers and plan is not None:
+            detail["spoken"] = service.spoken_view(task_id)
+        return detail
+
+    @app.get("/api/tasks/{task_id}/plan/spoken")
+    def plan_spoken(task_id: str, version: Optional[int] = None):
+        # The plan rendered for the ear (round 13): steps in
+        # order, figures spelled, dates spoken — a view of the
+        # stored plan, served with the hash a read-back binds
+        # to. Asking changes nothing.
+        if service.get_task(task_id) is None:
+            raise KeyError(f"task {task_id} does not exist")
+        try:
+            return service.spoken_view(task_id, version)
+        except GateError as exc:
+            raise KeyError(str(exc)) from exc
+
+    @app.post("/api/tasks/{task_id}/readback")
+    def readback(task_id: str, body: ReadbackIn):
+        # Issue the read-back token for the plan that stands:
+        # the response carries the spoken form the operator
+        # hears and the token bound to it (task, version,
+        # spoken hash, the operator it was issued to).
+        return service.issue_readback(task_id, body.operator)
+
+    @app.post("/api/tasks/{task_id}/confirm-readback")
+    def confirm_readback(task_id: str, body: ConfirmReadbackIn):
+        # Confirmation by read-back: every ordinary rule, plus
+        # the token — it must be this task's, this operator's,
+        # unspent, and bound to the version that still stands.
+        # A plan amended since the read-back refuses as stale.
+        task = service.confirm_readback(
+            task_id, body.operator, body.token)
+        return task.model_dump(mode="json")
 
     @app.get("/api/tasks/{task_id}/verification")
     def verification(task_id: str):
@@ -507,6 +565,15 @@ def create_app(settings: Optional[Settings] = None,
     @app.post("/api/operators/{name}/reactivate")
     def reactivate_operator(name: str, body: DirectoryActIn):
         return service.reactivate_operator(body.operator, name)
+
+    @app.put("/api/operators/{name}/preference")
+    def set_operator_preference(name: str, body: PreferenceIn):
+        # The spoken-form preference (round 13): a recorded
+        # supervisor act like the other directory acts. The
+        # flag steers presentation only — the console leading
+        # with the spoken form — and permits nothing.
+        return service.set_operator_preference(
+            body.operator, name, body.prefers_spoken)
 
     @app.get("/api/operators/orphaned")
     def orphaned_work():
