@@ -17,7 +17,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from page_agent_copilot.config import Settings  # noqa: E402
-from page_agent_copilot.models import StepReportIn, TaskStatus  # noqa: E402
+from page_agent_copilot.models import (  # noqa: E402
+    AmendChangeIn,
+    StepReportIn,
+    TaskStatus,
+)
+from page_agent_copilot.policy import PlanRefusal  # noqa: E402
 from page_agent_copilot.records import (  # noqa: E402
     apply_field_change,
     create_credit_memo,
@@ -207,6 +212,137 @@ def _():
            f"plan steps {plan.steps}")
     expect(svc.store.list_records("credit_memos") == [],
            "the note produced a credit memo")
+
+
+@case("multi-record: credit memo + invoice settled, both diffed exactly")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT + " and mark invoice 4471 as paid", "op")
+    plan = svc.get_plan(task.task_id)
+    expect(len(plan.steps) == 2, f"steps {len(plan.steps)}")
+    svc.confirm(task.task_id, "op")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    memo = svc.store.list_records("credit_memos")[0]
+    expect(memo["amount"] == "120.00" and memo["invoice_id"] == "4471",
+           f"memo {memo}")
+    invoice = svc.store.get_record("invoices", "4471")
+    expect(invoice["status"] == "paid", f"invoice {invoice['status']}")
+    expect(invoice["amount"] == "1840.00",
+           "an unplanned invoice field changed")
+
+
+@case("multi-record: shipped with date and carrier, three steps exact")
+def _():
+    svc = fresh()
+    before = svc.store.get_record("orders", "1032")
+    task = svc.intake("mark order 1032 as shipped, ship date "
+                      "2026-10-20, carrier DHL", "op")
+    svc.confirm(task.task_id, "op")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    after = svc.store.get_record("orders", "1032")
+    changed = {k for k in after if after[k] != before[k]}
+    expect(changed == {"status", "ship_date", "carrier"},
+           f"changed fields {changed}")
+
+
+@case("multi-record: a failed step is named, the plan is no success")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT + " and mark invoice 4471 as paid", "op")
+    svc.confirm(task.task_id, "op")
+    task = svc.execute(task.task_id, "offline", tamper={2: "open"})
+    expect(task.status == TaskStatus.DISCREPANCY, f"status {task.status}")
+    failed = [e for e in svc.audit(task.task_id)
+              if e["event"] == "verification_failed"]
+    diffs = failed[0]["detail"]["diffs"]
+    expect(len(diffs) == 1 and diffs[0]["seq"] == 2,
+           f"diffs {diffs}")
+
+
+@case("amendment: v2 confirmed binds v2, executed values are v2's")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    svc.amend(task.task_id, "op",
+              [AmendChangeIn(seq=1, fields={"amount": "150.00"})])
+    task = svc.confirm(task.task_id, "op")
+    expect(task.confirmed_version == 2,
+           f"confirmed_version {task.confirmed_version}")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    memo = svc.store.list_records("credit_memos")[0]
+    expect(memo["amount"] == "150.00", f"memo amount {memo['amount']}")
+    diff = svc.plan_diff(task.task_id, 1, 2)
+    expect(diff.step_diffs[0].changes[0].field == "amount",
+           f"diff {diff}")
+
+
+@case("amendment: a confirmed v1 can never be edited into a v2")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    svc.confirm(task.task_id, "op")
+    try:
+        svc.amend(task.task_id, "op",
+                  [AmendChangeIn(seq=1, fields={"amount": "150.00"})])
+    except GateError:
+        pass
+    else:
+        raise AssertionError("a confirmed plan was amended")
+    task = svc.execute(task.task_id, "offline")
+    memo = svc.store.list_records("credit_memos")[0]
+    expect(memo["amount"] == "120.00",
+           f"executed amount {memo['amount']} — not the confirmed v1")
+
+
+@case("amendment: a policy-breaking value is refused, plan untouched")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    try:
+        svc.amend(task.task_id, "op",
+                  [AmendChangeIn(seq=1, fields={"amount": "900.00"})])
+    except PlanRefusal as refusal:
+        expect(refusal.code == "credit_above_cap",
+               f"code {refusal.code}")
+    else:
+        raise AssertionError("an over-cap amendment was accepted")
+    task = svc.get_task(task.task_id)
+    expect(task.status == TaskStatus.PLANNED and task.plan_version == 1,
+           f"task {task.status} v{task.plan_version}")
+
+
+@case("staleness: a record changed under the plan refuses execution")
+def _():
+    svc = fresh()
+    task = svc.intake("mark order 1032 as shipped", "op")
+    svc.confirm(task.task_id, "op")
+    apply_field_change(svc.store, "orders", "1032", "carrier", "FedEx")
+    try:
+        svc.execute(task.task_id, "offline")
+    except GateError:
+        pass
+    else:
+        raise AssertionError("a stale plan executed")
+    task = svc.get_task(task.task_id)
+    expect(task.status == TaskStatus.STALE, f"status {task.status}")
+    expect(task.stale_records == ["orders 1032"],
+           f"stale {task.stale_records}")
+    order = svc.store.get_record("orders", "1032")
+    expect(order["status"] == "packed" and order["carrier"] == "FedEx",
+           "the stale execution wrote something")
+    # The way back: re-plan (v1 kept, superseded), confirm, execute.
+    task = svc.replan(task.task_id, "op")
+    expect(task.plan_version == 2, f"version {task.plan_version}")
+    expect(svc.get_plan(task.task_id, 1).superseded is True,
+           "the stale version was not marked superseded")
+    svc.confirm(task.task_id, "op")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    expect(svc.store.get_record("orders", "1032")["status"] == "shipped",
+           "the re-planned task did not land")
 
 
 def main() -> int:
