@@ -1261,7 +1261,15 @@ class CopilotService:
                 plan_version=plan.version, mode=mode,
                 base_attempt=(number if base_attempt is None
                               else base_attempt),
-                started_at=_now())
+                started_at=_now(),
+                # The budget, snapshotted from Policy at claim
+                # time: the attempt runs under the ceilings in
+                # force when it started, whatever Policy says
+                # later — the record states its own budget.
+                step_ceiling=self.settings.policy
+                .max_execution_steps,
+                seconds_ceiling=self.settings.policy
+                .max_execution_seconds)
             self._store_attempt(attempt)
             task.attempts = number
             task.failed_step = None
@@ -1355,6 +1363,75 @@ class CopilotService:
                     f"{step.fields.get('invoice_id', '')}")
         return lines
 
+    # -- budgets -----------------------------------------------------
+    # The ceilings an attempt runs under are snapshotted on the
+    # attempt at claim time (see _claim_attempt); the checks below
+    # read the attempt's own copies, never Policy afresh, so an
+    # attempt's budget cannot move mid-run. The attempt is the
+    # budget unit: its consumed steps are its own outcomes, and a
+    # resume or restart — a new attempt — starts from zero.
+
+    @staticmethod
+    def _elapsed_seconds(attempt: ExecutionAttempt) -> float:
+        """The attempt's wall clock so far, from its recorded
+        start to now — the same `_now` stamps every record
+        carries, so the measure is the record's own."""
+        started = datetime.fromisoformat(attempt.started_at)
+        return (datetime.now(timezone.utc) - started).total_seconds()
+
+    def _budget_block(self, attempt: ExecutionAttempt,
+                      step: PlanStep) -> Optional[str]:
+        """Why the budget forbids running (or accepting) `step`
+        next on this attempt — or None when it may proceed. The
+        wall clock is the outer bound and is read first: an
+        attempt that has already spanned its seconds has no steps
+        left in it, whatever the count says. The returned text is
+        the exhaustion's own wording: it names the ceiling and
+        the counts, and it is recorded verbatim — on the attempt,
+        in the audit, and on the task as its failure reason."""
+        elapsed = self._elapsed_seconds(attempt)
+        if elapsed >= attempt.seconds_ceiling:
+            return (
+                f"budget exhausted: this execution has run "
+                f"{int(elapsed)}s of its wall-clock ceiling of "
+                f"{attempt.seconds_ceiling}s; step {step.seq} "
+                f"was not run")
+        if len(attempt.steps) >= attempt.step_ceiling:
+            return (
+                f"budget exhausted: this attempt has used its "
+                f"{attempt.step_ceiling} execution steps "
+                f"(ceiling {attempt.step_ceiling}); step "
+                f"{step.seq} was not run")
+        return None
+
+    def _exhaust_execution(self, task: Task, plan: Plan,
+                           attempt: ExecutionAttempt,
+                           step: PlanStep, reason: str,
+                           driver: str) -> Task:
+        """Stop an attempt for budget, through the ordinary
+        failure machinery: the un-run step is recorded as the
+        attempt's failed step with the exhaustion as its error,
+        the attempt carries the exhaustion on its own fields,
+        and the task lands in EXECUTION_FAILED naming it — the
+        partial state stands, and the exits are the failure
+        exits (resume, restart, abandon), each a new attempt
+        with a fresh budget. There is no silent overrun and no
+        budget-specific terminal state to hide in."""
+        failed = StepOutcome(seq=step.seq, driver=driver,
+                             ok=False, detail=reason)
+        attempt.steps.append(failed)
+        attempt.budget_exhausted = True
+        attempt.exhaustion_reason = reason
+        self._store_attempt(attempt)
+        self._audit(task.task_id, driver, "budget_exhausted", {
+            "attempt": attempt.number, "mode": attempt.mode,
+            "plan_version": plan.version,
+            "seq": step.seq, "reason": reason,
+            "steps_consumed": len(attempt.steps) - 1,
+            "step_ceiling": attempt.step_ceiling,
+            "seconds_ceiling": attempt.seconds_ceiling})
+        return self._fail_execution(task, plan, attempt, failed)
+
     def _fail_execution(self, task: Task, plan: Plan,
                         attempt: ExecutionAttempt,
                         failed: StepOutcome) -> Task:
@@ -1383,6 +1460,8 @@ class CopilotService:
             "driver": attempt.driver, "executor": attempt.executor,
             "plan_version": plan.version,
             "failed_seq": failed.seq, "error": failed.detail,
+            "budget_exhausted": attempt.budget_exhausted,
+            "exhaustion_reason": attempt.exhaustion_reason,
             "completed_steps": [o.seq for o in attempt.steps if o.ok],
             "partial_state": attempt.state_lines})
         return task
@@ -1423,6 +1502,13 @@ class CopilotService:
         written down."""
         runner = OfflineDriver(tamper=tamper, fail=fail)
         for step in steps:
+            # The budget is read before the step runs: a step the
+            # ceiling forbids is never handed to the driver at
+            # all, so nothing it would have written can land.
+            block = self._budget_block(attempt, step)
+            if block is not None:
+                return self._exhaust_execution(
+                    task, plan, attempt, step, block, DRIVER_OFFLINE)
             try:
                 outcome = runner.run_step(self.store, task, plan, step)
             except Exception as exc:  # the driver's error, verbatim
@@ -1579,17 +1665,31 @@ class CopilotService:
                 f"step {seq} of task {task_id} was already completed "
                 f"by an earlier attempt; a resumed execution runs "
                 f"only the steps that never completed")
+        step = next(s for s in plan.steps if s.seq == seq)
         detail = report.detail
         if not report.ok and not detail:
             detail = ("the in-page agent reported this step failed "
                       "and gave no detail")
         outcome = StepOutcome(seq=seq, driver=DRIVER_LIVE,
                               ok=report.ok, detail=detail)
-        attempt.steps.append(outcome)
-        self._store_attempt(attempt)
         self._audit(task_id, DRIVER_LIVE, "step_reported", {
             "seq": seq, "ok": report.ok, "detail": report.detail,
             "attempt": attempt.number, "plan_version": plan.version})
+        # The report stands in the trail as data either way — it
+        # arrived. But a report that lands past the attempt's
+        # budget is not accepted: the shell stops accepting
+        # reports at the ceiling, and the execution fails for
+        # budget with the steps that did land standing. (The
+        # bridge may already have done the step's work in the
+        # page; that state stands too, named in the attempt's
+        # state lines like any partial state — nothing is
+        # verified, and nothing is silently overrun.)
+        block = self._budget_block(attempt, step)
+        if block is not None:
+            return self._exhaust_execution(
+                task, plan, attempt, step, block, DRIVER_LIVE)
+        attempt.steps.append(outcome)
+        self._store_attempt(attempt)
         if not report.ok:
             return self._fail_execution(task, plan, attempt, outcome)
         if self._completed_seqs(task_id, attempt.base_attempt) != \
@@ -2375,6 +2475,39 @@ class CopilotService:
                 "tasks_executed": executed,
                 "refusals_received": sum(refusals.values()),
                 "refusals_by_code": dict(sorted(refusals.items())),
+            })
+        return report
+
+    def budget_report(self) -> list[dict]:
+        """What each operator's executions cost, folded from the
+        attempt records — never from counters, so the read cannot
+        drift from the records it summarises. Per directory name:
+        the attempts it ran, the distinct tasks those attempts
+        belong to, the steps consumed (the attempts' own outcomes,
+        the failed step included — it was spent), and the attempts
+        the shell stopped for budget. An attempt's executor is the
+        name its claim recorded; attempts from before the
+        directory round carry none and fold to nobody — the same
+        of-their-time limit the operator report states."""
+        attempts: list[ExecutionAttempt] = []
+        for raw in self.store.list_records("executions"):
+            raw = {k: v for k, v in raw.items() if k != "id"}
+            attempts.append(ExecutionAttempt(**raw))
+        report: list[dict] = []
+        for raw in self.list_operators():
+            name = operator_named(raw["id"])
+            mine = [a for a in attempts
+                    if a.executor
+                    and operator_named(a.executor) == name]
+            report.append({
+                "operator": raw["id"],
+                "role": raw["role"],
+                "active": self.entry_active(raw),
+                "attempts_run": len(mine),
+                "tasks_executed": len({a.task_id for a in mine}),
+                "steps_consumed": sum(len(a.steps) for a in mine),
+                "budget_exhaustions": sum(
+                    1 for a in mine if a.budget_exhausted),
             })
         return report
 

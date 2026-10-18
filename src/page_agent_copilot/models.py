@@ -268,6 +268,16 @@ class ExecutionAttempt(BaseModel):
     line by line, the state the attempt left in place: on a failed
     attempt that is the partial state, and it is what an
     abandonment records.
+
+    The attempt is also the budget unit. `step_ceiling` and
+    `seconds_ceiling` snapshot the governed ceilings (Policy) in
+    force when the attempt was claimed, so the record states the
+    budget the attempt ran under even after Policy changes; steps
+    consumed is `len(steps)` — the outcomes are the consumption.
+    When the shell stops an attempt for budget, `budget_exhausted`
+    is set and `exhaustion_reason` names which ceiling, with the
+    counts. Attempts from before the budget round carry 0
+    ceilings and no exhaustion — they ran before budgets existed.
     """
 
     task_id: str
@@ -292,6 +302,14 @@ class ExecutionAttempt(BaseModel):
     failed_seq: Optional[int] = None
     error: Optional[str] = None
     state_lines: list[str] = Field(default_factory=list)
+    # The budget this attempt ran under, snapshotted from Policy
+    # at claim time (0 = an attempt from before budgets existed),
+    # and the exhaustion record when the shell stopped it: which
+    # ceiling, with the counts, in `exhaustion_reason`.
+    step_ceiling: int = 0
+    seconds_ceiling: int = 0
+    budget_exhausted: bool = False
+    exhaustion_reason: Optional[str] = None
 
 
 class FieldDiff(BaseModel):
