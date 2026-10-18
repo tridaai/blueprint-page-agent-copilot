@@ -40,6 +40,7 @@ def exercise_store(store) -> None:
     store.add_audit({"task_id": "TASK-T1", "event": "b"})
     store.add_audit({"task_id": "TASK-T2", "event": "c"})
     assert [e["event"] for e in store.list_audit("TASK-T1")] == ["a", "b"]
+    assert [e["event"] for e in store.list_all_audit()] == ["a", "b", "c"]
 
 
 def test_in_memory_store():

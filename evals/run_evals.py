@@ -749,6 +749,138 @@ def _():
            == "attempt_in_flight", f"audit {refused}")
 
 
+@case("identity: deactivation orphans work, pickup completes it")
+def _():
+    svc = fresh()
+    svc.enroll_operator("s.hale", "k.adeyemi", "operator")
+    planned = svc.intake(CREDIT, "k.adeyemi")
+    confirmed = svc.intake("mark order 1032 as shipped", "k.adeyemi")
+    svc.confirm(confirmed.task_id, "s.hale")
+    svc.deactivate_operator("s.hale", "k.adeyemi")
+    events = [e["event"] for e in svc.role_audit()]
+    expect(events == ["operator_enrolled", "operator_deactivated"],
+           f"directory acts on the trail: {events}")
+    refused = svc.intake(CREDIT, "k.adeyemi")
+    expect(refused.status == TaskStatus.REFUSED
+           and refused.refusal_reason.startswith("operator_inactive"),
+           f"deactivated intake: {refused.refusal_reason}")
+    for act in (lambda: svc.confirm(planned.task_id, "k.adeyemi"),
+                lambda: svc.execute(confirmed.task_id, "offline")):
+        try:
+            act()
+        except GateError:
+            pass
+        else:
+            raise AssertionError("a deactivated name's act stood")
+    inactive = [e["detail"]["code"]
+                for tid in (planned.task_id, confirmed.task_id)
+                for e in svc.audit(tid)
+                if e["event"].endswith("_refused")]
+    expect(inactive.count("operator_inactive") >= 2,
+           f"recorded refusals: {inactive}")
+    orphaned = svc.orphaned_work()
+    expect({o["task_id"] for o in orphaned}
+           == {planned.task_id, confirmed.task_id},
+           f"orphaned work: {orphaned}")
+    expect(all(o["operator"] == "k.adeyemi" for o in orphaned),
+           "orphaned work does not name the deactivated operator")
+    try:
+        svc.pickup_task(confirmed.task_id, "op")
+    except GateError:
+        pass
+    else:
+        raise AssertionError("a non-supervisor picked up work")
+    picked = svc.pickup_task(confirmed.task_id, "s.hale")
+    expect(picked.operator == "s.hale"
+           and picked.planned_by == "k.adeyemi"
+           and picked.picked_up_from == "k.adeyemi",
+           "the pickup lost the original planner")
+    # The confirmation the task already holds stands — a pickup
+    # re-names the operator, it does not reopen the gates.
+    done = svc.execute(confirmed.task_id, "offline")
+    expect(done.status == TaskStatus.VERIFIED, f"status {done.status}")
+    expect(svc.store.get_record("orders", "1032")["status"]
+           == "shipped", "the picked-up work did not land")
+    expect([o["task_id"] for o in svc.orphaned_work()]
+           == [planned.task_id], "finished work still orphaned")
+
+
+@case("identity: attribution is complete on a mixed run")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "j.okafor")
+    try:
+        svc.confirm(task.task_id, "j.okafor")
+    except GateError:
+        pass
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "offline")
+    svc.intake("delete order 1036", "op")
+    svc.intake(CREDIT, "v.ward")
+    svc.enroll_operator("s.hale", "a.okafor", "viewer")
+    svc.deactivate_operator("s.hale", "a.okafor")
+    check = svc.attribution_check()
+    expect(check["ok"] is True and check["problems"] == [],
+           f"attribution problems: {check['problems']}")
+    expect(check["checked"] == len(svc.store.list_all_audit())
+           and check["checked"] > 0, "the scan missed entries")
+
+
+@case("identity: planted audit rows are named by the check")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "j.okafor")
+    svc.store.add_audit({
+        "task_id": task.task_id, "ts": "2026-10-18T00:00:00+00:00",
+        "actor": "", "event": "plan_confirmed", "detail": {}})
+    svc.store.add_audit({
+        "task_id": task.task_id, "ts": "2026-10-18T00:00:01+00:00",
+        "actor": "mallory", "event": "task_created", "detail": {}})
+    check = svc.attribution_check()
+    expect(check["ok"] is False, "planted rows passed the check")
+    problems = {(p["actor"], p["problem"]) for p in check["problems"]}
+    expect(("", "actor_missing") in problems,
+           f"problems: {check['problems']}")
+    expect(("mallory", "actor_unresolvable") in problems,
+           f"problems: {check['problems']}")
+    expect(check["checked"] == len(svc.store.list_all_audit()),
+           "the planted rows were not counted in the scan")
+
+
+@case("identity: the operator report reconciles with the audit")
+def _():
+    svc = fresh()
+    svc.enroll_operator("s.hale", "a.okafor", "operator")
+    task = svc.intake(CREDIT, "a.okafor")
+    try:
+        svc.confirm(task.task_id, "a.okafor")
+    except GateError:
+        pass
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "offline")
+    svc.intake("raise a credit memo for invoice 4471, reason "
+               "goodwill, $900", "a.okafor")
+    rows = {r["operator"]: r for r in svc.operator_report()}
+    entries = svc.store.list_all_audit()
+    directory = {o["id"] for o in svc.list_operators()}
+    expect(sum(r["tasks_planned"] for r in rows.values())
+           == sum(1 for e in entries if e["event"] == "task_created"),
+           "planned counts do not reconcile with the trail")
+    expect(sum(r["tasks_executed"] for r in rows.values())
+           == sum(1 for e in entries
+                  if e["event"] == "execution_completed"),
+           "executed counts do not reconcile with the trail")
+    expect(sum(r["acts_total"] for r in rows.values())
+           == sum(1 for e in entries if e["actor"] in directory),
+           "act totals do not reconcile with the trail")
+    expect(rows["a.okafor"]["refusals_by_code"]
+           == {"credit_above_cap": 1, "self_confirmation": 1},
+           f"refusals: {rows['a.okafor']['refusals_by_code']}")
+    expect(rows["a.okafor"]["tasks_executed"] == 1
+           and rows["s.hale"]["tasks_confirmed"] == 1,
+           "the executor and confirmer are not the recorded names")
+
+
 def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     for name, ok, detail in RESULTS:
