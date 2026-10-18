@@ -154,8 +154,10 @@
       <h3>Task <span id="task-id-label"></span> — <span id="task-status-chip"></span></h3>
       <div id="task-refusal" class="err"></div>
       <div id="task-stale" class="err"></div>
+      <div id="task-failure" class="err"></div>
       <div id="task-parent" class="note"></div>
       <div id="task-deviation" class="note"></div>
+      <div id="task-abandoned" class="note"></div>
       <div id="task-plan"></div>
       <div id="task-plans"></div>
       <div style="margin-top:10px; display:flex; gap:8px;">
@@ -197,6 +199,25 @@
         <button class="act secondary" id="task-accept-deviation">Accept deviation (supervisor)</button>
         <span class="note" id="discrepancy-note"></span>
       </div>
+      <div id="task-recovery" hidden>
+        <h3 style="margin-top:16px;">Execution failed — pick it up, run it again, or close it</h3>
+        <p class="note">The run stopped at the failed step. The steps before it stand as they
+          landed — they are named in the attempt record below, and nothing is rolled back.
+          Resume runs only the steps that never completed, after checking the completed work
+          still stands and the rest of the plan's basis has not moved. Restart runs the whole
+          plan again as a new attempt, and is refused once a step has created a record — a
+          create is never run twice. Abandon closes the task as ABANDONED with a reason; the
+          partial state stays on the records, named.</p>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="act" id="task-resume">Resume execution</button>
+          <button class="act secondary" id="task-restart">Restart from step 1</button>
+        </div>
+        <div class="field" style="margin-top:10px;"><label for="abandon-reason">Abandonment reason</label>
+          <input id="abandon-reason" type="text" placeholder="required — why this work stands as it landed"></div>
+        <button class="act secondary" id="task-abandon">Abandon task</button>
+        <span class="note" id="recovery-note"></span>
+      </div>
+      <div id="task-attempts"></div>
       <div id="task-verification"></div>
       <h3 style="margin-top:16px;">Audit trail</h3>
       <div class="audit" id="task-audit"></div>

@@ -264,8 +264,39 @@
     }
   }
 
+  // The execution attempts, rendered from the stored records:
+  // every attempt with the steps it completed and — for a failed
+  // one — the step it stopped at and the driver's error verbatim,
+  // plus the state lines naming what the attempt left in place.
+  function renderAttempts(attempts) {
+    const div = $("task-attempts");
+    div.innerHTML = "";
+    if (!attempts || !attempts.length) return;
+    const h = document.createElement("h3");
+    h.style.marginTop = "16px";
+    h.textContent = "Execution attempts";
+    div.appendChild(h);
+    attempts.forEach((a) => {
+      const head = document.createElement("p");
+      head.className = "note";
+      head.textContent =
+        `Attempt ${a.number} (${a.mode}) · driver ${a.driver} · ` +
+        `${a.outcome} · ${a.started_at}` +
+        (a.finished_at ? ` → ${a.finished_at}` : "");
+      div.appendChild(head);
+      const lines = a.steps.map((s) =>
+        s.ok ? `✓ step ${s.seq}: ${s.detail}`
+             : `✗ step ${s.seq}: FAILED — ${s.detail}`);
+      a.state_lines.forEach((l) => lines.push(`  left standing: ${l}`));
+      const pre = document.createElement("div");
+      pre.className = "diff";
+      pre.textContent = lines.join("\n");
+      div.appendChild(pre);
+    });
+  }
+
   async function openTask(taskId) {
-    const { task, plan, plan_versions, verification } =
+    const { task, plan, plan_versions, verification, attempts } =
       await api("/api/tasks/" + taskId);
     current.task = task;
     $("task-detail").hidden = false;
@@ -298,6 +329,18 @@
         ? `Deviation accepted by ${task.deviation_accepted_by}: ` +
           `${task.deviation_reason}. The verification report below ` +
           `stands as written.`
+        : "";
+    $("task-failure").textContent =
+      task.status === "EXECUTION_FAILED"
+        ? `Execution failed at step ${task.failed_step}: ` +
+          `${task.failure_error}. The steps before it stand as ` +
+          `recorded in the attempt below — nothing was rolled back.`
+        : "";
+    $("task-abandoned").textContent =
+      task.status === "ABANDONED"
+        ? `Abandoned by ${task.abandoned_by}: ${task.abandon_reason}. ` +
+          `The partial state stands on the records, named in the ` +
+          `final attempt below.`
         : "";
     const planDiv = $("task-plan");
     if (plan) {
@@ -352,6 +395,9 @@
     $("task-replan").disabled = task.status !== "STALE";
     $("task-discrepancy").hidden = task.status !== "DISCREPANCY";
     $("discrepancy-note").textContent = "";
+    $("task-recovery").hidden = task.status !== "EXECUTION_FAILED";
+    $("recovery-note").textContent = "";
+    renderAttempts(attempts);
     renderVerification(task, verification);
     const audit = await api("/api/tasks/" + taskId + "/audit");
     $("task-audit").textContent = audit.map((a) =>
@@ -420,6 +466,26 @@
       `/api/tasks/${current.task.task_id}/accept-deviation`,
       { operator: asOperator(),
         reason: $("deviation-reason").value },
+      async () => { refreshTasks(); openTask(current.task.task_id); });
+  });
+  // The failure exits. Resume and restart are execution acts on
+  // the failed task; abandon closes it with a mandatory reason.
+  // Refusals — a moved basis, a create already landed — surface
+  // with the server's reason, like every other act.
+  $("task-resume").addEventListener("click", async () => {
+    await actOnTask(`/api/tasks/${current.task.task_id}/resume`,
+      { operator: asOperator() },
+      async () => { refreshAll(); openTask(current.task.task_id); });
+  });
+  $("task-restart").addEventListener("click", async () => {
+    await actOnTask(`/api/tasks/${current.task.task_id}/restart`,
+      { operator: asOperator() },
+      async () => { refreshAll(); openTask(current.task.task_id); });
+  });
+  $("task-abandon").addEventListener("click", async () => {
+    await actOnTask(`/api/tasks/${current.task.task_id}/abandon`,
+      { operator: asOperator(),
+        reason: $("abandon-reason").value },
       async () => { refreshTasks(); openTask(current.task.task_id); });
   });
   $("task-amend-btn").addEventListener("click", async () => {

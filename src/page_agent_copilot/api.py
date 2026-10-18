@@ -22,6 +22,7 @@ from .config import Settings
 from .logging_setup import new_request_id, setup_logging
 from .models import (
     PAYMENT_FIELDS,
+    AbandonIn,
     AcceptDeviationIn,
     AmendIn,
     ConfirmIn,
@@ -30,6 +31,8 @@ from .models import (
     ExecuteIn,
     RejectIn,
     ReplanIn,
+    RestartIn,
+    ResumeIn,
     RoleUpdateIn,
     StepReportIn,
     TaskIntake,
@@ -224,6 +227,8 @@ def create_app(settings: Optional[Settings] = None,
                 "plan": plan.model_dump(mode="json") if plan else None,
                 "plan_versions": [p.version
                                   for p in service.list_plans(task_id)],
+                "attempts": [a.model_dump(mode="json")
+                             for a in service.get_attempts(task_id)],
                 "verification": (report.model_dump(mode="json")
                                  if report else None)}
 
@@ -320,6 +325,41 @@ def create_app(settings: Optional[Settings] = None,
     def execute(task_id: str, body: ExecuteIn):
         task = service.execute(task_id, body.driver,
                                operator=body.operator)
+        return task.model_dump(mode="json")
+
+    @app.get("/api/tasks/{task_id}/attempts")
+    def attempts(task_id: str):
+        # Every execution attempt, numbered: the steps each one
+        # completed, and for a failed attempt the step it stopped
+        # at and the driver's error verbatim.
+        if service.get_task(task_id) is None:
+            raise KeyError(f"task {task_id} does not exist")
+        return [a.model_dump(mode="json")
+                for a in service.get_attempts(task_id)]
+
+    @app.post("/api/tasks/{task_id}/resume")
+    def resume(task_id: str, body: ResumeIn):
+        # Pick a failed execution up where it stopped: only the
+        # steps that never completed run, and only after the
+        # basis is re-checked in code. A moved basis is a 409
+        # naming what moved.
+        task = service.resume_execution(task_id, body.operator)
+        return task.model_dump(mode="json")
+
+    @app.post("/api/tasks/{task_id}/restart")
+    def restart(task_id: str, body: RestartIn):
+        # Run the plan again from step 1, as a new attempt —
+        # refused (409) once a CREATE step has completed, because
+        # a created record is never created twice.
+        task = service.restart_execution(task_id, body.operator)
+        return task.model_dump(mode="json")
+
+    @app.post("/api/tasks/{task_id}/abandon")
+    def abandon(task_id: str, body: AbandonIn):
+        # Close a failed execution as ABANDONED: an execution
+        # act with a mandatory reason. The partial state stays
+        # on the records, named — nothing is cleaned up.
+        task = service.abandon(task_id, body.operator, body.reason)
         return task.model_dump(mode="json")
 
     # -- roles ---------------------------------------------------------
