@@ -79,6 +79,39 @@ evidence.
   customer read from the invoice record, never named in the
   text — verified end to end with a linkage check tying the
   updated customer to the memo's invoice.
+- **Accessibility mode** — a view and a door for operators who
+  work by voice, never a second shell. Every plan has a
+  **spoken form**: a rendering produced in code from the
+  stored plan — steps in order, figures spelled as words,
+  dates spoken, field names in plain words — served at
+  `GET /api/tasks/{id}/plan/spoken` and shown in the console.
+  It is a view: the stored plan keeps its digits, and asking
+  for the spoken form changes nothing. Confirmation gains a
+  **read-back** path on top of the same gate: the shell
+  issues a token bound to the task, the plan version, the
+  spoken form's hash, and the operator it was issued to
+  (`POST /api/tasks/{id}/readback`), and confirming with it
+  (`POST /api/tasks/{id}/confirm-readback`) runs every
+  ordinary rule — second person, confirm-capable role,
+  active name — plus the binding: amend the plan after the
+  read-back and the token refuses as stale, naming both
+  versions, because the confirmer must hear the version they
+  approve. The act is recorded as `plan_confirmed` with
+  `method: readback`. Intake gains a **transcript** door
+  (`POST /api/tasks/transcript`): the envelope a speech
+  recogniser wraps a dictation in — speaker labels,
+  timestamps, line breaks — is normalised in code, and the
+  cleaned text goes through the ordinary intake, so a
+  transcript produces the plan the same words typed produce;
+  the raw transcript rides the task's trail. Numbers are
+  never converted from words — ids and amounts must arrive
+  as digits. And the directory entry carries a
+  `prefers_spoken` flag, set by a recorded supervisor act
+  (`PUT /api/operators/{name}/preference`): when set, the
+  console task view leads with the spoken form and the
+  read-back route is the offered confirmation path. The
+  flag is presentation only — it permits nothing, and the
+  eval gate proves the same refusals land with it set.
 - **Plan amendments and diffs** — while a plan awaits confirmation,
   an operator may amend its values; every amended value passes the
   same policy checks as planning, the amendment becomes plan
@@ -414,6 +447,12 @@ scope — `operator_enrolled`, `operator_role_changed`,
 `directory_refused` — at `POST /api/operators`,
 `PUT /api/operators/{name}/role`,
 `POST /api/operators/{name}/deactivate`, and `/reactivate`.
+The spoken-form preference rides the same scope
+(`operator_preference_changed`) at
+`PUT /api/operators/{name}/preference`. A task's trail also
+carries its read-backs (`readback_issued`, `readback_refused`)
+and its transcript arrivals (`transcript_intake`, the raw
+transcript beside the normalised statement).
 Orphaned work lists at `GET /api/operators/orphaned` and moves
 only through `POST /api/tasks/{id}/pickup` (`task_picked_up`,
 with `pickup_refused` recorded on a refusal). Executions name
@@ -489,6 +528,9 @@ src/page_agent_copilot/
                   and the only path verification re-reads through
   verify.py       the verification act: field + linkage checks over
                   the re-read, producing the stored report
+  spoken.py       the spoken form: a plan rendered for the ear
+                  (figures spelled, dates spoken), its hash, and
+                  the transcript normaliser
   store.py        the store port: in-memory / SQLite / PostgreSQL
   records.py      the one mutation path for OrderDesk state
   dataset.py      the OrderDesk seed data (generated in code; gold
@@ -499,7 +541,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (71 cases)
+evals/            the scripted-task gate (77 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -507,9 +549,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 273 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 290 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 71/71 cases: happy paths diffed exactly (including
+make evals   # 77/77 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -600,6 +642,17 @@ make evals   # 71/71 cases: happy paths diffed exactly (including
              # step budget), a bridge report that skips the
              # navigation refused and recorded before the run
              # completes, and single-page plans unchanged
+             # — and accessibility: a credit plan's spoken form
+             # spelling its amount with the stored plan unmoved,
+             # a multi-page plan's spoken form naming both its
+             # pages, a read-back token confirming end to end
+             # with the method on the trail, a token for v1
+             # refused after amendment to v2 with both versions
+             # named in the recorded reason, a diarised
+             # transcript planning identically to the same words
+             # typed, and the spoken-form preference changing
+             # presentation only — the same refusals landing
+             # with it set
 ```
 
 ## Honest status
@@ -630,6 +683,16 @@ make evals   # 71/71 cases: happy paths diffed exactly (including
   serves it to the operator's own console page so the in-page agent
   can be constructed — a demo posture. A deployment should have
   operators supply the key in the page instead.
+- **Accessibility mode stops at the transcript.** The shell does
+  no speech recognition and no text-to-speech: a deployment's
+  recogniser produces the transcript text and its screen reader
+  speaks the spoken form; the shell normalises the envelope,
+  plans, gates, and binds the confirmation to the words served.
+  Spelled-out numbers are a deliberate non-goal — record ids and
+  amounts must arrive as digits, because a word-to-number
+  converter guessing at an id could plan against the wrong
+  record; a transcript whose figures are words refuses as
+  underivable text, like any task the grammar cannot derive.
 
 ## Licence
 

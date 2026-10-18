@@ -540,6 +540,53 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   the memo's invoice. All of this stays at the shell-protocol
   level: the bridge's in-browser move between screens is the
   same honest unrun gap as the rest of the live path.
+- **Accessibility mode** (round 13) — a view and a door, never
+  a second shell, for operators who work by voice. The
+  **spoken form** (`spoken.py`) is a deterministic rendering
+  produced in code from the stored plan at the moment of
+  asking: steps in plan order, figures spelled as words,
+  dates spoken, field names in their plain labels — served
+  at `GET /api/tasks/{id}/plan/spoken` and shown in the
+  console. It is never stored and asking for it changes
+  nothing; its hash is SHA-256 over the rendering.
+  **Read-back confirmation** is the ordinary gate with one
+  binding added: issuing a read-back
+  (`POST /api/tasks/{id}/readback`, to an enrolled, active
+  operator only) stores a token record (kind `readbacks`)
+  bound to the task, the plan version, the spoken hash, and
+  the operator it was issued to; confirming
+  (`POST /api/tasks/{id}/confirm-readback`) runs every
+  confirmation check unchanged — status, active name,
+  confirm-capable role, never the planner, all through the
+  one `_check_confirmer` both paths share — and then
+  requires the token to be this task's, this operator's,
+  unspent, and bound to the version that still stands. An
+  amendment after the read-back moves the version and
+  changes the spoken words, so the old token refuses as
+  `readback_stale`, naming both versions — the confirmer
+  must hear the version they approve — and the act lands as
+  `plan_confirmed` carrying `method: readback` and the
+  spoken hash, so the trail shows *how* the plan was
+  confirmed. **Transcript intake**
+  (`POST /api/tasks/transcript`) normalises the envelope a
+  speech recogniser wraps a dictation in — a speaker label
+  or timestamp marker at the head of a line, stripped by
+  governed rule, the lines joined — and hands the cleaned
+  text to the ordinary intake, so a transcript produces the
+  plan the same words typed produce; the raw transcript
+  rides the task's trail (`transcript_intake`). Numbers are
+  never converted from words: record ids and amounts must
+  arrive as digits, because a converter guessing at an id
+  could plan against the wrong record — a transcript whose
+  figures are words is underivable text, refused like any
+  other. The directory entry carries a `prefers_spoken`
+  preference, set by a recorded supervisor act
+  (`PUT /api/operators/{name}/preference`); when set, the
+  task detail leads with the spoken form and the console
+  offers the read-back route first. The flag is
+  presentation only — it grants no action class, widens no
+  allowlist, and skips no check; the eval gate proves the
+  same refusals land with it set.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -617,7 +664,21 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   the execution actually stands, and the code that refused it),
   and `step_report_refused` (a live step report refused as a
   protocol violation — today, a report that crosses pages with
-  no navigation reported, `navigation_missing`).
+  no navigation reported, `navigation_missing`). Accessibility
+  adds: `readback_issued` (the plan version read, the spoken
+  hash, the operator the token was issued to) and
+  `readback_refused` (why no token was issued — an unknown or
+  deactivated name), on the task's trail; `transcript_intake`
+  (the raw transcript and the normalised statement it became),
+  on the task's trail; and `operator_preference_changed` (the
+  operator, the new `prefers_spoken` value), under the roles
+  scope with the other directory acts. A read-back confirmation
+  is the ordinary `plan_confirmed` entry carrying
+  `method: readback`, the spoken hash, and the token id; a
+  read-back refusal is the ordinary `confirmation_refused`
+  entry carrying the read-back codes (`readback_unknown`,
+  `readback_operator_mismatch`, `readback_used`,
+  `readback_stale`) beside the unchanged identity codes.
 
 ## The PageAgent API, as verified
 
