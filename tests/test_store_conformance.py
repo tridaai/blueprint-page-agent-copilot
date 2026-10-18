@@ -51,9 +51,56 @@ def test_sqlite_store(tmp_path):
     exercise_store(SqlStore("sqlite", str(tmp_path / "copilot.db")))
 
 
+def _database_identity(dsn: str) -> tuple:
+    """(host, port, dbname) a DSN points at, with libpq's defaults."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    info = conninfo_to_dict(dsn)
+    return (info.get("host", "localhost"), str(info.get("port", "5432")),
+            info.get("dbname"))
+
+
+def _fresh_postgres(dsn: str) -> None:
+    """Empty the scratch database the conformance leg runs against.
+
+    The contract below asserts exact contents (a first seed, a fixed
+    record count, an audit trail of exactly three entries), so it
+    needs a provably empty store — a database a previous run already
+    exercised fails it on leftovers, not on behaviour. Dropping every
+    public table makes the store's own migrations rebuild the schema
+    on construction, so the leg still exercises the full contract
+    against a real Postgres.
+
+    The wipe only ever touches the database COPILOT_TEST_DATABASE_URL
+    names. If that turns out to be the same database the app itself
+    is configured with (DATABASE_URL), refuse loudly instead: wiping
+    the application's own database from a test would be a disaster
+    dressed as hygiene.
+    """
+    import psycopg
+
+    app_url = os.environ.get("DATABASE_URL")
+    if app_url:
+        try:
+            same = _database_identity(app_url) == _database_identity(dsn)
+        except Exception:
+            same = False  # not a Postgres DSN — cannot name this database
+        if same:
+            raise RuntimeError(
+                "COPILOT_TEST_DATABASE_URL points at the application's "
+                "own DATABASE_URL database; refusing to wipe it. Point "
+                "COPILOT_TEST_DATABASE_URL at a scratch database.")
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tables = [row[0] for row in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'")]
+        for table in tables:
+            conn.execute(f'DROP TABLE IF EXISTS "{table}" CASCADE')
+
+
 @pytest.mark.skipif(
     not os.environ.get("COPILOT_TEST_DATABASE_URL"),
     reason="COPILOT_TEST_DATABASE_URL not set (Postgres stack down)")
 def test_postgres_store():
-    exercise_store(SqlStore("postgres",
-                            os.environ["COPILOT_TEST_DATABASE_URL"]))
+    dsn = os.environ["COPILOT_TEST_DATABASE_URL"]
+    _fresh_postgres(dsn)
+    exercise_store(SqlStore("postgres", dsn))
