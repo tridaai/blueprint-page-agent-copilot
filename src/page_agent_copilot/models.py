@@ -535,6 +535,17 @@ class VerifyIn(BaseModel):
     operator: str = "operator"
 
 
+class AuditExportIn(BaseModel):
+    """A request to export one scope's audit trail, chained.
+    Exporting is a recorded act: `operator` is the exporter, who
+    must be an enrolled, active operator. `format` names the
+    rendering — the JSON document, or its CSV rendering; the
+    chain is the same either way, and verification runs over
+    the document."""
+    operator: str
+    format: str = "json"  # "json" | "csv"
+
+
 class StepReportIn(BaseModel):
     """The browser bridge's report of one live step. Advisory only:
     the shell's verification diffs the store, never this report."""

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from .batches import BatchCreateIn, BatchError
@@ -26,6 +26,7 @@ from .models import (
     AbandonIn,
     AcceptDeviationIn,
     AmendIn,
+    AuditExportIn,
     AssignRoleIn,
     ConfirmIn,
     ConsoleSaveIn,
@@ -420,6 +421,45 @@ def create_app(settings: Optional[Settings] = None,
     def roles_audit():
         return service.role_audit()
 
+    # -- audit exports --------------------------------------------------
+    # An export chains one scope's trail (exports.py): every
+    # entry's hash over the previous hash and its own content,
+    # under a header naming the scope, the exporter, the time,
+    # the count, and the final hash — so an edited, dropped,
+    # reordered, or truncated copy fails verification at the
+    # first broken entry. Exporting is a recorded act behind
+    # the identity gate (an unknown or deactivated exporter is
+    # refused 409, on the record); the document covers the
+    # trail as it stood, and the `audit_exported` entry the
+    # act writes is the next export's first new link.
+    def _export_response(document, fmt: str):
+        if fmt == "csv":
+            return PlainTextResponse(
+                service.render_export_csv(document),
+                media_type="text/csv")
+        return document
+
+    def _export_refused_format(fmt: str):
+        return JSONResponse(status_code=422, content={
+            "detail": f"format '{fmt}' is not an export "
+                      f"rendering; use 'json' or 'csv'",
+            "code": "format_not_supported"})
+
+    @app.post("/api/roles-audit/export")
+    def export_roles_audit(body: AuditExportIn):
+        if body.format not in ("json", "csv"):
+            return _export_refused_format(body.format)
+        document = service.export_scope_audit(
+            "roles", body.operator, rendering=body.format)
+        return _export_response(document, body.format)
+
+    @app.post("/api/audit/verify")
+    def verify_audit_export(document: dict):
+        # Grading a document is a read, not an act: the verdict
+        # (intact, or broken at the first failing entry) writes
+        # nothing anywhere.
+        return service.verify_audit_export(document)
+
     # -- the operator directory --------------------------------------
     # Enrolment, role assignment, deactivation, and reactivation
     # are recorded supervisor acts (the acting supervisor rides in
@@ -519,6 +559,14 @@ def create_app(settings: Optional[Settings] = None,
     def templates_audit():
         return service.template_audit()
 
+    @app.post("/api/templates-audit/export")
+    def export_templates_audit(body: AuditExportIn):
+        if body.format not in ("json", "csv"):
+            return _export_refused_format(body.format)
+        document = service.export_scope_audit(
+            "templates", body.operator, rendering=body.format)
+        return _export_response(document, body.format)
+
     # -- batches ------------------------------------------------------
     # A batch groups tasks submitted together. Creation states
     # each member through ordinary intake; the other routes are
@@ -569,6 +617,18 @@ def create_app(settings: Optional[Settings] = None,
     def batches_audit():
         return service.batch_audit()
 
+    @app.post("/api/batches/{batch_id}/audit/export")
+    def export_batch_audit(batch_id: str, body: AuditExportIn):
+        # The batch's trail: its own scope entries and every
+        # member task's trail, interleaved in true order.
+        if body.format not in ("json", "csv"):
+            return _export_refused_format(body.format)
+        if service.get_batch(batch_id) is None:
+            raise KeyError(f"batch {batch_id} does not exist")
+        document = service.export_batch_audit(
+            batch_id, body.operator, rendering=body.format)
+        return _export_response(document, body.format)
+
     @app.post("/api/tasks/{task_id}/steps/{seq}/report")
     def report_step(task_id: str, seq: int, body: StepReportIn):
         task = service.report_step(task_id, seq, body)
@@ -579,6 +639,16 @@ def create_app(settings: Optional[Settings] = None,
         if service.get_task(task_id) is None:
             raise KeyError(f"task {task_id} does not exist")
         return service.audit(task_id)
+
+    @app.post("/api/tasks/{task_id}/audit/export")
+    def export_task_audit(task_id: str, body: AuditExportIn):
+        if body.format not in ("json", "csv"):
+            return _export_refused_format(body.format)
+        if service.get_task(task_id) is None:
+            raise KeyError(f"task {task_id} does not exist")
+        document = service.export_task_audit(
+            task_id, body.operator, rendering=body.format)
+        return _export_response(document, body.format)
 
     # -- the live bridge ---------------------------------------------------
     @app.get("/api/agent-config")

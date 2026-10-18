@@ -146,6 +146,7 @@ from .batches import (
 )
 from .config import Settings
 from .drivers import DRIVER_LIVE, DRIVER_OFFLINE, OfflineDriver
+from .exports import build_export, render_csv, verify_export
 from .models import (
     AmendChangeIn,
     AuditEntry,
@@ -2678,3 +2679,133 @@ class CopilotService:
             "refused": refused,
             "owing_acts": owing,
         }
+
+    # -- audit exports ------------------------------------------------
+    # An export takes one scope's trail and chains it (exports.py):
+    # every entry's SHA-256 over the previous hash and its own
+    # canonical content, under a header naming the scope, the
+    # exporter, the export time, the count, and the final hash.
+    # Exporting is a recorded act with an identity gate, like
+    # every other act in the shell: the exporter must be an
+    # enrolled, active operator; a refusal is written into the
+    # exported scope's trail before it raises. The act's own
+    # entry (`audit_exported`) is written AFTER the document is
+    # built, so a document never contains its own export entry —
+    # the chain covers the trail as it stood at export, and the
+    # next export of the scope chains the earlier export's entry
+    # in with the rest.
+
+    # The governance scopes an export can name, by the key the
+    # API and the document use.
+    EXPORT_SCOPES = {
+        "roles": ROLE_AUDIT_SCOPE,
+        "templates": TEMPLATE_AUDIT_SCOPE,
+    }
+
+    def _export_gate(self, scope_task_id: str, exporter: str,
+                     scope: dict) -> None:
+        """The identity gate every export passes, mirroring the
+        confirmation gate's refusals: an unknown name and a
+        deactivated name are each refused, and the refusal is
+        recorded in the exported scope's trail, under the name
+        that tried, before it raises."""
+        entry = self.directory_entry(exporter)
+        if entry is not None and not self.entry_active(entry):
+            reason = (f"'{exporter}' is deactivated; a "
+                      f"deactivated operator may not export "
+                      f"audit trails")
+            self._audit(scope_task_id, exporter, "export_refused", {
+                "code": "operator_inactive", "reason": reason,
+                "scope": scope})
+            raise GateError(
+                f"audit export refused: {reason} "
+                f"(operator_inactive)")
+        if entry is None:
+            reason = (f"'{exporter}' holds no role in the "
+                      f"operator directory; an export is an "
+                      f"act of a named, enrolled operator")
+            self._audit(scope_task_id, exporter, "export_refused", {
+                "code": "unknown_operator", "reason": reason,
+                "scope": scope})
+            raise GateError(
+                f"audit export refused: {reason} "
+                f"(unknown_operator)")
+
+    def _finish_export(self, scope_task_id: str, scope: dict,
+                       exporter: str, entries: list[dict],
+                       rendering: str) -> dict:
+        """Build the chained document from the trail as it
+        stands, then record the act in the scope's trail — in
+        that order, so the document never contains its own
+        export entry."""
+        document = build_export(scope, exporter, _now(), entries)
+        self._audit(scope_task_id, exporter, "audit_exported", {
+            "scope": scope,
+            "entry_count": document["entry_count"],
+            "final_hash": document["final_hash"],
+            "rendering": rendering})
+        return document
+
+    def export_task_audit(self, task_id: str, exporter: str,
+                          rendering: str = "json") -> dict:
+        """One task's trail, chained. The task must exist; the
+        exporter must pass the identity gate."""
+        self._require_task(task_id)
+        scope = {"kind": "task", "id": task_id}
+        self._export_gate(task_id, exporter, scope)
+        return self._finish_export(
+            task_id, scope, exporter, self.audit(task_id),
+            rendering)
+
+    def export_batch_audit(self, batch_id: str, exporter: str,
+                           rendering: str = "json") -> dict:
+        """One batch's trail, chained: the batch scope's own
+        entries that name this batch, and every member task's
+        trail, interleaved in the trail's true order — the
+        global audit read filtered to the batch, never a
+        per-task concatenation that would invent an order the
+        work did not happen in. A member that never became a
+        task has no trail of its own; the batch scope's
+        `batch_created` entry carries its refusal."""
+        batch = self.get_batch(batch_id)
+        if batch is None:
+            raise KeyError(f"batch {batch_id} does not exist")
+        scope = {"kind": "batch", "id": batch_id}
+        self._export_gate(BATCH_AUDIT_SCOPE, exporter, scope)
+        member_ids = {m.task_id for m in batch.members if m.task_id}
+        entries = [
+            e for e in self.store.list_all_audit()
+            if e["task_id"] in member_ids
+            or (e["task_id"] == BATCH_AUDIT_SCOPE
+                and (e.get("detail") or {}).get("batch_id")
+                == batch_id)]
+        return self._finish_export(
+            BATCH_AUDIT_SCOPE, scope, exporter, entries, rendering)
+
+    def export_scope_audit(self, scope_name: str, exporter: str,
+                           rendering: str = "json") -> dict:
+        """One governance scope's trail, chained — `roles` or
+        `templates`, the scopes whose acts administer the shell
+        itself (role edits, directory acts, template publishes
+        and refusals)."""
+        scope_task_id = self.EXPORT_SCOPES.get(scope_name)
+        if scope_task_id is None:
+            raise GateError(
+                f"there is no exportable audit scope named "
+                f"'{scope_name}'")
+        scope = {"kind": scope_name}
+        self._export_gate(scope_task_id, exporter, scope)
+        return self._finish_export(
+            scope_task_id, scope, exporter,
+            self.store.list_audit(scope_task_id), rendering)
+
+    @staticmethod
+    def render_export_csv(document: dict) -> str:
+        return render_csv(document)
+
+    @staticmethod
+    def verify_audit_export(document: dict) -> dict:
+        """Grade an export document's chain — a read, not an
+        act: nothing is recorded, because checking evidence
+        must not write on the trail it checks."""
+        return verify_export(document)
