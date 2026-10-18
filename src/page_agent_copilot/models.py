@@ -75,13 +75,59 @@ class PlanStep(BaseModel):
     instruction: str = ""
 
 
+class RecordPrecondition(BaseModel):
+    """The state a plan was derived from, for one record it touches:
+    a content hash of the record as it stood at plan time. Execution
+    re-hashes the same records; a difference means the plan's basis
+    moved and the plan is stale (see service.execute)."""
+
+    record_kind: str
+    record_id: str
+    hash: str
+
+
+class PlanChange(BaseModel):
+    """One field-level change, recorded wherever plans change:
+    an amendment's diff, a plan-version diff. `old`/`new` are the
+    string forms the plan itself carries; None means absent on
+    that side."""
+
+    seq: int
+    field: str
+    old: Optional[str] = None
+    new: Optional[str] = None
+
+
 class Plan(BaseModel):
     task_id: str
     version: int = 1
     task_type: str
     summary: str
     steps: list[PlanStep]
+    preconditions: list[RecordPrecondition] = Field(default_factory=list)
+    superseded: bool = False
     created_at: str = ""
+
+
+# ------------------------------------------------------------- plan diffs
+
+class StepDiff(BaseModel):
+    """How one step (by seq) differs between two plan versions."""
+
+    seq: int
+    change: str  # "added" | "removed" | "changed"
+    changes: list[PlanChange] = Field(default_factory=list)
+
+
+class PlanDiff(BaseModel):
+    task_id: str
+    from_version: int
+    to_version: int
+    step_diffs: list[StepDiff] = Field(default_factory=list)
+
+    @property
+    def identical(self) -> bool:
+        return not self.step_diffs
 
 
 # ------------------------------------------------------------------- task
@@ -93,6 +139,11 @@ class TaskStatus(str, Enum):
     VERIFIED = "VERIFIED"          # executed; post-state == plan, exactly
     DISCREPANCY = "DISCREPANCY"    # executed; post-state != plan (named)
     REFUSED = "REFUSED"            # refused at plan time by policy
+    STALE = "STALE"                # a record the plan rests on changed
+                                   # between planning and execution;
+                                   # execution refused, re-plan required
+    REJECTED = "REJECTED"          # a human rejected the plan; the
+                                   # route onward is a fresh intake
 
 
 class Task(BaseModel):
@@ -102,6 +153,15 @@ class Task(BaseModel):
     status: TaskStatus = TaskStatus.DRAFT
     plan_version: Optional[int] = None
     confirmed_by: Optional[str] = None
+    # The exact plan version the confirmation binds. Execution runs
+    # this version — never "the latest" — so a confirmation of v1
+    # can never execute a v2 that did not exist when the human said
+    # yes. (Amendment after confirmation is refused outright; this
+    # binding is the second lock on the same door.)
+    confirmed_version: Optional[int] = None
+    # Records whose state changed under a stale plan, named as
+    # "kind id" (set on the STALE transition, cleared on re-plan).
+    stale_records: list[str] = Field(default_factory=list)
     refusal_reason: Optional[str] = None
     driver: Optional[str] = None
     created_at: str = ""
@@ -120,6 +180,7 @@ class StepOutcome(BaseModel):
 
 
 class FieldDiff(BaseModel):
+    seq: int = 0                 # the plan step whose check failed
     record_kind: str
     record_id: str
     field: str
@@ -149,6 +210,34 @@ class TaskIntake(BaseModel):
 
 
 class ConfirmIn(BaseModel):
+    operator: str
+
+
+class AmendChangeIn(BaseModel):
+    """One amendment to one plan step, addressed by step seq.
+
+    For a SET step, `value` is the new planned value. For a CREATE
+    step, `fields` carries the replacement values for individual
+    create-fields (e.g. {"amount": "150.00"}). The amended plan
+    passes every value through the same policy checks planning
+    used; a change policy would have refused in a fresh plan is
+    refused as an amendment too."""
+
+    seq: int
+    value: Optional[str] = None
+    fields: dict[str, str] = Field(default_factory=dict)
+
+
+class AmendIn(BaseModel):
+    operator: str
+    changes: list[AmendChangeIn]
+
+
+class RejectIn(BaseModel):
+    operator: str
+
+
+class ReplanIn(BaseModel):
     operator: str
 
 
