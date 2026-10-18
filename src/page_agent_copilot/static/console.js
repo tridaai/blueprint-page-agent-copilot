@@ -214,8 +214,59 @@
     }).join("\n");
   }
 
+  // The verification report, rendered from the stored record the
+  // task detail carries — the same report the API serves at
+  // /api/tasks/{id}/verification. Per-field verdicts, the linkage
+  // checks, and the correction chain a discrepancy has spawned.
+  function renderVerification(task, report) {
+    const div = $("task-verification");
+    div.innerHTML = "";
+    $("task-verify").innerHTML = "";
+    if (!report) return;
+    const h = document.createElement("h3");
+    h.style.marginTop = "16px";
+    h.textContent = "Verification report";
+    div.appendChild(h);
+    const head = document.createElement("p");
+    head.className = "note";
+    head.textContent =
+      `Plan v${report.plan_version} · driver ${report.driver} · read via ` +
+      `${report.read_path} · ${report.verified_at} · ` +
+      `${report.checked} field checks, ${report.linkage_checks.length} ` +
+      `linkage checks — ${report.ok ? "all match" : "DIFFERENCES NAMED"}. ` +
+      `Verification ran once, at the end of execution; the report is the ` +
+      `record and is not recomputed.`;
+    div.appendChild(head);
+    const lines = [];
+    report.field_checks.forEach((c) => lines.push(
+      `${c.verdict === "match" ? "✓" : "✗"} step ${c.seq} · ` +
+      `${c.record_kind} ${c.record_id}.${c.field}: planned ` +
+      `'${c.expected}', read '${c.actual}'`));
+    report.linkage_checks.forEach((c) => lines.push(
+      `${c.verdict === "match" ? "✓" : "✗"} step ${c.seq} · linkage ` +
+      `${c.check} (${c.record_kind} ${c.record_id}.${c.field}): ` +
+      `${c.detail}`));
+    report.corrections.forEach((c) => lines.push(
+      `→ corrective ${c.task_id}: ${c.status}` +
+      (c.verification_ok === null ? ""
+        : c.verification_ok ? " — its verification passed"
+                            : " — its verification named differences")));
+    const pre = document.createElement("div");
+    pre.className = "diff";
+    pre.textContent = lines.join("\n");
+    div.appendChild(pre);
+    if (!report.ok) {
+      $("task-verify").innerHTML =
+        `<span class="err">Verification failed — differing fields: ` +
+        report.diffs.map((d) =>
+          `${d.record_kind} ${d.record_id}.${d.field}: planned ` +
+          `'${d.planned}', actual '${d.actual}'`).join("; ") + "</span>";
+    }
+  }
+
   async function openTask(taskId) {
-    const { task, plan, plan_versions } = await api("/api/tasks/" + taskId);
+    const { task, plan, plan_versions, verification } =
+      await api("/api/tasks/" + taskId);
     current.task = task;
     $("task-detail").hidden = false;
     $("task-id-label").textContent = task.task_id;
@@ -228,6 +279,26 @@
         (task.stale_records || []).join(", ") +
         ". Nothing ran. Re-plan to derive a fresh version."
       : "";
+    // The correction chain, both ways: a corrective names its
+    // parent (click to open it); a parent lists its correctives in
+    // its verification report above.
+    const parentDiv = $("task-parent");
+    parentDiv.innerHTML = "";
+    if (task.parent_task_id) {
+      parentDiv.appendChild(document.createTextNode(
+        `This is a corrective task for ${task.parent_task_id}. `));
+      const btn = document.createElement("button");
+      btn.className = "act secondary";
+      btn.textContent = "Open the parent task";
+      btn.addEventListener("click", () => openTask(task.parent_task_id));
+      parentDiv.appendChild(btn);
+    }
+    $("task-deviation").textContent =
+      task.status === "DISCREPANCY_ACCEPTED"
+        ? `Deviation accepted by ${task.deviation_accepted_by}: ` +
+          `${task.deviation_reason}. The verification report below ` +
+          `stands as written.`
+        : "";
     const planDiv = $("task-plan");
     if (plan) {
       planDiv.innerHTML = "";
@@ -279,16 +350,12 @@
     $("task-reject").disabled =
       !(task.status === "PLANNED" || task.status === "CONFIRMED");
     $("task-replan").disabled = task.status !== "STALE";
+    $("task-discrepancy").hidden = task.status !== "DISCREPANCY";
+    $("discrepancy-note").textContent = "";
+    renderVerification(task, verification);
     const audit = await api("/api/tasks/" + taskId + "/audit");
     $("task-audit").textContent = audit.map((a) =>
       `${a.ts}  ${a.event}  by ${a.actor}  ${JSON.stringify(a.detail)}`).join("\n");
-    const failed = audit.filter((a) => a.event === "verification_failed");
-    $("task-verify").innerHTML = failed.length
-      ? `<span class="err">Verification failed — differing fields: ` +
-        failed[failed.length - 1].detail.diffs.map(
-          (d) => `${d.record_kind} ${d.record_id}.${d.field}: planned ` +
-                 `'${d.planned}', actual '${d.actual}'`).join("; ") + "</span>"
-      : "";
   }
 
   $("task-create").addEventListener("click", async () => {
@@ -329,6 +396,30 @@
   $("task-replan").addEventListener("click", async () => {
     await actOnTask(`/api/tasks/${current.task.task_id}/replan`,
       { operator: asOperator() },
+      async () => { refreshTasks(); openTask(current.task.task_id); });
+  });
+  // The discrepancy exits. Spawning a corrective opens the new
+  // task; accepting a deviation is a supervisor act with a
+  // mandatory reason — both refusals surface with the server's
+  // reason, like every other act.
+  $("task-corrective").addEventListener("click", async () => {
+    const res = await fetch(
+      `/api/tasks/${current.task.task_id}/corrective`,
+      json("POST", { operator: asOperator() }));
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("discrepancy-note").textContent =
+        "Refused: " + (body.detail || `-> ${res.status}`);
+      return;
+    }
+    refreshTasks();
+    openTask(body.task.task_id);
+  });
+  $("task-accept-deviation").addEventListener("click", async () => {
+    await actOnTask(
+      `/api/tasks/${current.task.task_id}/accept-deviation`,
+      { operator: asOperator(),
+        reason: $("deviation-reason").value },
       async () => { refreshTasks(); openTask(current.task.task_id); });
   });
   $("task-amend-btn").addEventListener("click", async () => {

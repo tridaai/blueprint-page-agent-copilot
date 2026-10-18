@@ -29,6 +29,7 @@
   button.act:disabled { background:#A9A9B8; cursor:not-allowed; }
   .chip { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; letter-spacing:.4px; }
   .chip.VERIFIED { background:#DFF5E1; color:#14632A; } .chip.DISCREPANCY { background:#FBE0E0; color:#8F1D1D; }
+  .chip.DISCREPANCY_ACCEPTED { background:#FFF3CD; color:#7A5B00; }
   .chip.REFUSED { background:#FBE0E0; color:#8F1D1D; } .chip.CONFIRMED { background:#E2E0FF; color:#3730A3; }
   .chip.PLANNED { background:#FFF3CD; color:#7A5B00; } .chip.DRAFT { background:#E8E8EF; color:#444; }
   .chip.STALE { background:#FFE1B8; color:#7A4A00; } .chip.REJECTED { background:#E8E8EF; color:#444; }
@@ -153,6 +154,8 @@
       <h3>Task <span id="task-id-label"></span> — <span id="task-status-chip"></span></h3>
       <div id="task-refusal" class="err"></div>
       <div id="task-stale" class="err"></div>
+      <div id="task-parent" class="note"></div>
+      <div id="task-deviation" class="note"></div>
       <div id="task-plan"></div>
       <div id="task-plans"></div>
       <div style="margin-top:10px; display:flex; gap:8px;">
@@ -179,6 +182,22 @@
         this browser; it needs a configured model endpoint (PAGEAGENT_* settings) and fills the
         actual forms on these screens.</p>
       <div id="task-verify" style="margin-top:8px;"></div>
+      <div id="task-discrepancy" hidden>
+        <h3 style="margin-top:16px;">Resolve this discrepancy</h3>
+        <p class="note">A discrepancy has exactly two exits, both recorded. Spawn a corrective
+          task — a new, linked task whose plan closes only the differences named below, confirmed
+          and verified in the usual way — or, as a supervisor, accept the deviation with a reason.
+          Accepting closes the task as DISCREPANCY_ACCEPTED; it never becomes VERIFIED, and the
+          report below is never edited.</p>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="act" id="task-corrective">Spawn corrective task</button>
+        </div>
+        <div class="field" style="margin-top:10px;"><label for="deviation-reason">Acceptance reason</label>
+          <input id="deviation-reason" type="text" placeholder="required — why this deviation stands"></div>
+        <button class="act secondary" id="task-accept-deviation">Accept deviation (supervisor)</button>
+        <span class="note" id="discrepancy-note"></span>
+      </div>
+      <div id="task-verification"></div>
       <h3 style="margin-top:16px;">Audit trail</h3>
       <div class="audit" id="task-audit"></div>
     </div>
