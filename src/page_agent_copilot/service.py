@@ -86,6 +86,25 @@ directory name (in any state) nor to one of the shell's named
 system components, and a per-operator report folded from the
 audit — never from counters — so what a name did, and what was
 refused to it, reads off the same trail.
+
+The task library (templates.py, round 7) sits in front of
+intake, never beside it. A template is a governed record — a
+task-text pattern with named slots, a note on when to use it,
+and a version — seeded from defaults through a strict loader
+and published in new versions only as recorded supervisor acts,
+old versions kept, superseded, and still instantiable by name
+and version. Instantiating one validates the slot values (a
+record slot must name a record that exists; a money slot must
+parse), renders the text, and hands it to `intake` unchanged:
+the planner derives the plan from the rendered text through the
+same grammar, so no template can smuggle a plan past the
+planner, and a slot value that renders text policy refuses
+produces the planner's own refusal on the task. Each version
+pins examples — slot values plus the exact plan shape they must
+derive — and a version's health is computed from them on read,
+against the seeded records: a planner or policy change that
+breaks a template's examples marks that version broken in the
+library, by name and version.
 """
 
 from __future__ import annotations
@@ -94,6 +113,7 @@ import threading
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
+from decimal import InvalidOperation
 from typing import Optional
 
 from .config import Settings
@@ -113,6 +133,7 @@ from .models import (
     Task,
     TaskStatus,
     VerificationReport,
+    money,
 )
 from .plandiff import diff_plans
 from .planner import (
@@ -140,7 +161,16 @@ from .roles import (
     plan_problems,
     role_diff,
 )
-from .store import Store
+from .store import InMemoryStore, Store
+from .templates import (
+    DEFAULT_TEMPLATES,
+    TEMPLATE_AUDIT_SCOPE,
+    TaskTemplate,
+    TemplateError,
+    load_template,
+    render_pattern,
+    shape_detail,
+)
 from .verify import run_verification
 
 
@@ -150,6 +180,20 @@ def _now() -> str:
 
 class GateError(Exception):
     """A state-machine refusal (HTTP 409 at the API)."""
+
+
+def _template_content(template: TaskTemplate) -> dict:
+    """A template version's content — pattern, description,
+    slots, examples — the fields a publish may change. Two
+    versions with equal content are the same template wearing two
+    numbers, which a publish refuses."""
+    return {
+        "pattern": template.pattern,
+        "description": template.description,
+        "slots": [s.model_dump(mode="json") for s in template.slots],
+        "examples": [e.model_dump(mode="json")
+                     for e in template.examples],
+    }
 
 
 # The states in which a task still owes its operator an act —
@@ -465,6 +509,280 @@ class CopilotService:
                         "operator": entry["id"],
                         "role": entry["role"]})
         return updated
+
+    # -- the task library ---------------------------------------------
+    # Templates are governed records like the roles: seeded from
+    # the defaults in templates.py through the strict loader, and
+    # changed only by publishing a new version — a recorded
+    # supervisor act in the library's own audit scope. A version
+    # is never edited and never deleted: a publish supersedes the
+    # previous version, which stays readable and instantiable by
+    # name and version, the way superseded plan versions do.
+
+    def _ensure_templates(self) -> None:
+        """Seed the library from the governed defaults when the
+        store has none. Called on every template read, so the
+        library in force is always the stored one."""
+        if not self.store.list_records("templates"):
+            for raw in DEFAULT_TEMPLATES:
+                template = load_template(raw)  # the seed passes it
+                self.store.upsert_record("templates", {
+                    "id": template.record_id,
+                    **template.model_dump(mode="json")})
+
+    def list_templates(self) -> list[TaskTemplate]:
+        self._ensure_templates()
+        templates = []
+        for raw in self.store.list_records("templates"):
+            raw = {k: v for k, v in raw.items() if k != "id"}
+            templates.append(load_template(raw))
+        return sorted(templates, key=lambda t: (t.name, t.version))
+
+    def get_template(self, name: str,
+                     version: Optional[int] = None
+                     ) -> Optional[TaskTemplate]:
+        """One template version: the exact version asked for, or
+        — version None — the current (highest) version of the
+        name. Callers that act on the result name the resolved
+        version in what they record; nothing here is silent."""
+        versions = [t for t in self.list_templates()
+                    if t.name == name]
+        if not versions:
+            return None
+        if version is None:
+            return versions[-1]
+        return next((t for t in versions if t.version == version),
+                    None)
+
+    def template_audit(self) -> list[dict]:
+        return self.store.list_audit(TEMPLATE_AUDIT_SCOPE)
+
+    def _template_refused(self, actor: str, act: str, target: str,
+                          code: str, reason: str) -> None:
+        self._audit(TEMPLATE_AUDIT_SCOPE, actor, "template_refused", {
+            "act": act, "target": target, "code": code,
+            "reason": reason})
+        raise GateError(f"{act} refused: {reason}")
+
+    def _template_actor(self, actor: str, act: str,
+                        target: str) -> dict:
+        """The gate every library administration act passes: the
+        acting name must be enrolled, active, and holding a role
+        that may administer. Each refusal is recorded before it
+        raises — the directory acts' discipline, in the library's
+        scope."""
+        entry = self.directory_entry(actor)
+        if entry is None:
+            self._template_refused(
+                actor, act, target, "unknown_operator",
+                f"'{actor}' holds no role in the operator "
+                f"directory; publishing a template is a "
+                f"supervisor act")
+        if not self.entry_active(entry):
+            self._template_refused(
+                actor, act, target, "operator_inactive",
+                f"'{actor}' is deactivated (operator_inactive) — "
+                f"a deactivated operator performs no acts")
+        role = self.get_role(entry["role"])
+        if role is None or not role.can_administer:
+            self._template_refused(
+                actor, act, target, "role_cannot_administer",
+                f"'{actor}' may not publish templates: the act "
+                f"needs a role with can_administer (a supervisor)")
+        return entry
+
+    def publish_template(self, actor: str,
+                         raw: dict) -> TaskTemplate:
+        """Publish a new version of a template: a recorded
+        supervisor act. The version number is the service's to
+        assign — the next for the name — and the content must
+        pass the strict loader whole. Publishing content identical
+        to the current version changes nothing and is refused;
+        the version it supersedes is kept, marked superseded,
+        and stays instantiable by name and version."""
+        name = raw.get("name", "")
+        self._template_actor(actor, "template publish", name)
+        current = self.get_template(name)
+        candidate = load_template({
+            **raw,
+            "version": (current.version + 1) if current else 1,
+            "published_by": actor, "published_at": _now(),
+            "superseded": False})
+        if current is not None and \
+                _template_content(candidate) == \
+                _template_content(current):
+            self._template_refused(
+                actor, "template publish", name, "no_change",
+                f"the new version of '{name}' is identical to "
+                f"v{current.version}; a publish that changes "
+                f"nothing is not a version")
+        if current is not None:
+            current.superseded = True
+            self.store.upsert_record("templates", {
+                "id": current.record_id,
+                **current.model_dump(mode="json")})
+        self.store.upsert_record("templates", {
+            "id": candidate.record_id,
+            **candidate.model_dump(mode="json")})
+        self._audit(TEMPLATE_AUDIT_SCOPE, actor,
+                    "template_published", {
+                        "template": name,
+                        "version": candidate.version,
+                        "supersedes": (current.version
+                                       if current else None)})
+        return candidate
+
+    def _instantiation_refused(self, operator: str, name: str,
+                               version: Optional[int], code: str,
+                               reason: str) -> None:
+        self._audit(TEMPLATE_AUDIT_SCOPE, operator,
+                    "template_instantiation_refused", {
+                        "template": name, "version": version,
+                        "code": code, "reason": reason})
+
+    def _validate_slots(self, template: TaskTemplate,
+                        slots: dict[str, str]) -> dict[str, str]:
+        """Validate slot values against the template's slot
+        declarations, before any text is rendered: every declared
+        slot filled, nothing undeclared offered, and each value
+        fit for its kind — a record slot names a record that
+        exists (the planner's own refusal, in its own words), a
+        money slot parses as money, a date slot is an ISO calendar
+        date. Raises TemplateError; instantiation records it."""
+        declared = {s.name: s for s in template.slots}
+        for name in slots:
+            if name not in declared:
+                raise TemplateError(
+                    "slot_not_declared",
+                    f"refused: '{name}' is not a slot of template "
+                    f"'{template.name}' v{template.version}; its "
+                    f"slots are {', '.join(sorted(declared))}")
+        values: dict[str, str] = {}
+        for slot in template.slots:
+            if slot.name not in slots:
+                raise TemplateError(
+                    "slot_missing",
+                    f"refused: template '{template.name}' "
+                    f"v{template.version} needs a value for its "
+                    f"'{slot.name}' slot; a template is never "
+                    f"filled by guessing")
+            value = slots[slot.name]
+            if slot.kind == "record":
+                if self.store.get_record(slot.record_kind or "",
+                                         value) is None:
+                    raise TemplateError(
+                        "record_not_found",
+                        f"refused: {(slot.record_kind or '')[:-1]} "
+                        f"{value} does not exist; a plan is only "
+                        f"derived from records that are there "
+                        f"(slot '{slot.name}')")
+            elif slot.kind == "money":
+                try:
+                    money(value)
+                except (InvalidOperation, ValueError):
+                    raise TemplateError(
+                        "slot_not_money",
+                        f"refused: '{value}' for slot "
+                        f"'{slot.name}' is not an amount")
+            elif slot.kind == "date":
+                try:
+                    datetime.strptime(value, "%Y-%m-%d")
+                    valid = len(value) == 10
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise TemplateError(
+                        "slot_not_a_date",
+                        f"refused: '{value}' for slot "
+                        f"'{slot.name}' is not a date "
+                        f"(YYYY-MM-DD)")
+            values[slot.name] = value
+        return values
+
+    def instantiate_template(self, name: str,
+                             version: Optional[int],
+                             slots: dict[str, str],
+                             operator: str) -> Task:
+        """Instantiate a template: validate the slots, render the
+        task text, and hand it to intake — the ordinary door, so
+        the planner derives the plan from the rendered text and
+        the role rules and policy apply exactly as they do to a
+        typed task. A slot value that renders text the planner
+        cannot derive, or policy refuses, returns the REFUSED
+        task intake itself produces, with the planner's reason on
+        it: instantiation adds no bypass and no second refusal
+        language. The task records the template's name and the
+        exact version used — the resolved version, named even
+        when the caller asked for the current one — and the act
+        is written to the task's audit trail."""
+        template = self.get_template(name, version)
+        if template is None:
+            which = (f"'{name}' v{version}" if version is not None
+                     else f"'{name}'")
+            reason = (f"there is no template {which} in the "
+                      f"library")
+            self._instantiation_refused(operator, name, version,
+                                        "template_not_found", reason)
+            raise TemplateError("template_not_found",
+                                f"refused: {reason}")
+        try:
+            values = self._validate_slots(template, slots)
+        except TemplateError as err:
+            self._instantiation_refused(
+                operator, name, template.version, err.code,
+                err.message)
+            raise
+        task = self.intake(render_pattern(template.pattern, values),
+                           operator)
+        task.template_name = template.name
+        task.template_version = template.version
+        self.store.put_task(task.model_dump(mode="json"))
+        self._audit(task.task_id, operator, "template_instantiated", {
+            "template": template.name, "version": template.version,
+            "requested_version": version, "slots": values})
+        return task
+
+    def template_health(self, template: TaskTemplate) -> dict:
+        """A version's health, computed on read from its pinned
+        examples: each example's rendered text is derived against
+        a scratch store seeded with the OrderDesk records — the
+        same basis the eval gate grades on — and the derived plan
+        must be the shape the example pins. The repo's eval
+        runner stores no results, so there is no stored verdict
+        to read back; this is the examples, re-derived at the
+        moment of asking."""
+        from .dataset import seed_records
+
+        scratch = InMemoryStore()
+        scratch.seed_if_empty(seed_records())
+        examples = []
+        for example in template.examples:
+            try:
+                plan = derive_plan(
+                    render_pattern(template.pattern, example.slots),
+                    scratch, self.settings.policy, "TASK-HEALTH")
+                detail = shape_detail(plan, example)
+            except PlanRefusal as refusal:
+                detail = (f"the rendered text is refused: "
+                          f"{refusal.code}: {refusal.message}")
+            examples.append({
+                "slots": dict(example.slots),
+                "ok": detail is None,
+                "detail": detail or ""})
+        return {"ok": all(e["ok"] for e in examples),
+                "examples": examples}
+
+    def template_view(self, template: TaskTemplate) -> dict:
+        """One version as the library serves it: the record, with
+        its health folded in and `current` naming whether it is
+        the version a name-only instantiation would use."""
+        view = template.model_dump(mode="json")
+        view["current"] = not template.superseded
+        view["health"] = self.template_health(template)
+        return view
+
+    def list_template_views(self) -> list[dict]:
+        return [self.template_view(t) for t in self.list_templates()]
 
     # -- intake + planning ---------------------------------------------
     def intake(self, text: str, operator: str) -> Task:
