@@ -62,7 +62,9 @@
         `${r.pages.join(", ") || "—"} | fields: ${fields || "—"}`;
     }).join("\n") + "\n" + roleData.operators.map(
       (o) => `${o.id} → ${o.role}` +
-        (o.active === false ? " (deactivated)" : "")).join("\n");
+        (o.active === false ? " (deactivated)" : "") +
+        (o.prefers_spoken ? " (prefers the spoken form)" : "")
+        ).join("\n");
     renderDirectory();
     updateRoleLine();
   }
@@ -125,6 +127,15 @@
         json("PUT", { operator: asOperator(),
                       role: roleSel.value })));
       row.appendChild(assignBtn);
+      const prefBtn = document.createElement("button");
+      prefBtn.className = "act secondary";
+      prefBtn.textContent = o.prefers_spoken
+        ? "Spoken form: on" : "Spoken form: off";
+      prefBtn.addEventListener("click", () => dirAct(
+        `/api/operators/${o.id}/preference`,
+        json("PUT", { operator: asOperator(),
+                      prefers_spoken: !o.prefers_spoken })));
+      row.appendChild(prefBtn);
       box.appendChild(row);
     });
   }
@@ -650,10 +661,50 @@
     });
   }
 
+  // The plan in its spoken form (round 13): rendered by the
+  // shell from the stored plan — steps in order, figures
+  // spelled, dates spoken. When the task's operator prefers
+  // the spoken form, the detail carries it and the block leads
+  // the task view, ahead of the written plan; otherwise it
+  // reads as a plain secondary view under the same heading.
+  // Either way it is a view: the stored plan never changes.
+  async function renderSpoken(task, plan, detail) {
+    const box = $("task-spoken");
+    box.innerHTML = "";
+    if (!plan) return;
+    let view = detail.spoken;
+    if (!view) {
+      view = await api("/api/tasks/" + task.task_id +
+                       "/plan/spoken");
+    }
+    const head = document.createElement("h3");
+    head.style.marginTop = "16px";
+    head.textContent = detail.operator_prefers_spoken
+      ? "Plan, in spoken form — this operator works by voice, "
+        + "so the spoken form leads"
+      : "Plan, in spoken form";
+    box.appendChild(head);
+    const pre = document.createElement("div");
+    pre.className = "diff";
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = view.spoken;
+    box.appendChild(pre);
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent =
+      "Spoken form of plan v" + view.plan_version +
+      " (hash " + view.spoken_hash.slice(0, 12) + "…). " +
+      "Confirming by read-back binds the confirmation to " +
+      "these exact words.";
+    box.appendChild(note);
+  }
+
   async function openTask(taskId) {
+    const detail = await api("/api/tasks/" + taskId);
     const { task, plan, plan_versions, verification, attempts } =
-      await api("/api/tasks/" + taskId);
+      detail;
     current.task = task;
+    current.readbackToken = "";
     $("task-detail").hidden = false;
     $("task-id-label").textContent = task.task_id;
     $("task-status-chip").innerHTML =
@@ -758,6 +809,7 @@
       });
       planDiv.appendChild(ol);
     } else { planDiv.innerHTML = ""; }
+    renderSpoken(task, plan, detail);
     // Version history + a compare view between any two versions.
     const plansDiv = $("task-plans");
     plansDiv.innerHTML = "";
@@ -788,6 +840,10 @@
     }
     $("task-amend").hidden = task.status !== "PLANNED";
     $("task-confirm").disabled = task.status !== "PLANNED";
+    $("task-readback").hidden = task.status !== "PLANNED";
+    $("task-readback-confirm").disabled = true;
+    $("readback-spoken").textContent = "";
+    $("readback-note").textContent = "";
     const canRun = task.status === "CONFIRMED" && !task.driver;
     $("task-run-offline").disabled = !canRun;
     $("task-run-live").disabled = !canRun;
@@ -829,6 +885,46 @@
     await actOnTask(`/api/tasks/${current.task.task_id}/confirm`,
       { operator: asOperator() },
       async () => { refreshTasks(); openTask(current.task.task_id); });
+  });
+  // Read-back confirmation (round 13): "Read the plan aloud"
+  // asks the shell for the spoken form and the token bound to
+  // it, issued to the operator named above; "Confirm by
+  // read-back" spends that token. The shell enforces every
+  // ordinary rule plus the binding — an amendment after the
+  // read-back refuses here with the server's reason, like
+  // every other refusal in this console.
+  $("task-readback-issue").addEventListener("click", async () => {
+    const res = await fetch(
+      `/api/tasks/${current.task.task_id}/readback`,
+      json("POST", { operator: asOperator() }));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("readback-note").textContent =
+        "Refused: " + (data.detail || `-> ${res.status}`);
+      return;
+    }
+    current.readbackToken = data.token;
+    $("readback-spoken").textContent = data.spoken;
+    $("readback-note").textContent =
+      `Read-back issued to ${data.issued_to} for plan ` +
+      `v${data.plan_version}. Confirming now approves exactly ` +
+      `the words above.`;
+    $("task-readback-confirm").disabled = false;
+  });
+  $("task-readback-confirm").addEventListener("click", async () => {
+    await actOnTask(
+      `/api/tasks/${current.task.task_id}/confirm-readback`,
+      { operator: asOperator(), token: current.readbackToken },
+      async () => { refreshTasks(); openTask(current.task.task_id); });
+  });
+  $("task-create-transcript").addEventListener("click", async () => {
+    const body = { text: $("task-text").value,
+                   operator: $("task-operator").value || "operator" };
+    const { task } = await api("/api/tasks/transcript",
+                               json("POST", body));
+    $("task-create-note").textContent =
+      task.status === "REFUSED" ? task.refusal_reason : "Plan drafted.";
+    refreshTasks(); openTask(task.task_id);
   });
   $("task-run-offline").addEventListener("click", async () => {
     await actOnTask(`/api/tasks/${current.task.task_id}/execute`,

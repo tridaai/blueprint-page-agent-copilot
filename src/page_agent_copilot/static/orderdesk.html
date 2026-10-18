@@ -136,7 +136,12 @@
       <div class="note" id="task-role-line"></div>
       <textarea id="task-text" placeholder="e.g. raise a credit memo for invoice 4471, reason damaged goods, $120"></textarea>
       <div style="margin-top:8px;"><button class="act" id="task-create">Draft plan</button>
+      <button class="act secondary" id="task-create-transcript">Draft plan from transcript</button>
       <span class="note" id="task-create-note"></span></div>
+      <p class="note">The transcript route takes a dictated task as a speech recogniser
+        transcribed it — speaker labels ("Operator:"), timestamps, line breaks — and the
+        shell strips the envelope before the same grammar plans from it. Numbers must
+        arrive as digits: the shell does not turn spelled-out numbers into figures.</p>
     </div>
     <div class="panel">
       <h3>Tasks</h3>
@@ -241,6 +246,7 @@
       <div id="task-pickup" class="note"></div>
       <div id="task-deviation" class="note"></div>
       <div id="task-abandoned" class="note"></div>
+      <div id="task-spoken"></div>
       <div id="task-plan"></div>
       <div id="task-plans"></div>
       <div style="margin-top:10px; display:flex; gap:8px;">
@@ -251,6 +257,23 @@
         <button class="act secondary" id="task-replan">Re-plan</button>
       </div>
       <div id="task-action-note" class="err" style="margin-top:8px;"></div>
+      <div id="task-readback" hidden>
+        <h3 style="margin-top:16px;">Confirm by read-back (voice)</h3>
+        <p class="note">For an operator working by voice: the shell renders the plan in its
+          spoken form — steps in order, figures spelled, dates spoken — and issues a
+          read-back token bound to those exact words, the plan version, and the operator
+          hearing them. Confirming with the token runs every ordinary rule (a second
+          person, a confirm-capable role, an active name) and one more: if the plan was
+          amended after the read-back, the token no longer confirms — the confirmer must
+          hear the version they approve. The act lands on the trail as a confirmation
+          with method: readback.</p>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="act secondary" id="task-readback-issue">Read the plan aloud</button>
+          <button class="act" id="task-readback-confirm" disabled>Confirm by read-back</button>
+        </div>
+        <div id="readback-spoken" class="diff" style="margin-top:8px; white-space:pre-wrap;"></div>
+        <span class="note" id="readback-note"></span>
+      </div>
       <div id="task-amend" hidden>
         <h3 style="margin-top:16px;">Amend the plan (before confirmation)</h3>
         <div class="field"><label for="amend-seq">Step</label><input id="amend-seq" type="number" min="1" value="1"></div>
