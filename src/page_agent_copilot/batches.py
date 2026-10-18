@@ -107,6 +107,16 @@ class Batch(BaseModel):
     batch_id: str
     created_by: str
     created_at: str = ""
+    # The store-wide creation sequence, assigned by the service
+    # when the batch is first stored and never edited afterwards:
+    # the order the batch list reads in. `created_at` cannot
+    # carry that order (one-second granularity — two batches in
+    # the same second tie, and the tiebreak was the random id),
+    # so submission order is this number, not a timestamp and a
+    # coin flip. Batches stored before the field existed carry
+    # 0 and sort behind it by (created_at, batch_id). Still
+    # deliberately absent: any status — see the class docstring.
+    seq: int = 0
     members: list[BatchMemberRecord] = Field(default_factory=list)
 
     @property

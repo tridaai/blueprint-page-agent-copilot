@@ -223,6 +223,15 @@ class Task(BaseModel):
     # audit entry — it is never cleaned up quietly.
     abandoned_by: Optional[str] = None
     abandon_reason: Optional[str] = None
+    # The store-wide creation sequence, assigned by the service
+    # when the task is first stored and never edited afterwards:
+    # the order task lists read in. Neither the id (random hex)
+    # nor `created_at` (one-second granularity — two tasks in
+    # the same second tie) can order a list, so the sequence is
+    # the guarantee that a list reads in the order the work
+    # arrived. Tasks stored before the field existed carry 0 and
+    # sort behind it by (created_at, task_id).
+    seq: int = 0
     created_at: str = ""
     updated_at: str = ""
 

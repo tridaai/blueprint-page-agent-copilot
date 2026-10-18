@@ -251,6 +251,28 @@ class CopilotService:
 
         return self.store.seed_if_empty(seed_records())
 
+    # -- creation order ----------------------------------------------
+    def _next_seq(self) -> int:
+        """The next store-wide creation sequence: one more than
+        the highest sequence any task or batch already carries.
+        Tasks and batches share the one counter, so the sequence
+        is creation order across both. It is assigned under the
+        service lock at the moment a record is first stored (see
+        the call sites in `intake`, `spawn_corrective`, and
+        `create_batch`), so two records stored by this process
+        can never share a sequence; a second service process on
+        the same store could compute the same next value — the
+        process-local limit the execution claim already accepts.
+        Lists order by the sequence (see `list_tasks` and
+        `list_batches`): neither the random ids nor the
+        one-second `created_at` can carry that order."""
+        highest = 0
+        for raw in self.store.list_tasks():
+            highest = max(highest, int(raw.get("seq") or 0))
+        for raw in self.store.list_records("batches"):
+            highest = max(highest, int(raw.get("seq") or 0))
+        return highest + 1
+
     # -- audit --------------------------------------------------------
     def _audit(self, task_id: str, actor: str, event: str,
                detail: Optional[dict] = None) -> None:
@@ -818,7 +840,9 @@ class CopilotService:
         task = Task(task_id=task_id, text=text, operator=operator,
                     planned_by=operator,
                     created_at=_now(), updated_at=_now())
-        self.store.put_task(task.model_dump(mode="json"))
+        with self._lock:
+            task.seq = self._next_seq()
+            self.store.put_task(task.model_dump(mode="json"))
         self._audit(task_id, operator, "task_created", {"text": text})
         try:
             # The planner's identity is checked before the plan
@@ -882,7 +906,19 @@ class CopilotService:
         return Task(**raw) if raw else None
 
     def list_tasks(self) -> list[Task]:
-        return [Task(**t) for t in self.store.list_tasks()]
+        """Every task, in the order the work arrived — the
+        creation sequence the service stamped at first storage.
+        The store cannot carry this order (the SQL profile reads
+        tasks back by their random ids, the in-memory profile by
+        insertion), so the sort lives here, where the sequence
+        is assigned. Tasks stored before the sequence existed
+        carry 0 and fall back to (created_at, task_id) behind
+        it. Every reader that walks the task list — the API's
+        task list, the orphaned-work read, the correction
+        chains — inherits this order."""
+        tasks = [Task(**t) for t in self.store.list_tasks()]
+        return sorted(tasks,
+                      key=lambda t: (t.seq, t.created_at, t.task_id))
 
     def get_plan(self, task_id: str,
                  version: Optional[int] = None) -> Optional[Plan]:
@@ -2076,7 +2112,9 @@ class CopilotService:
             status=TaskStatus.PLANNED,
             plan_version=1, parent_task_id=task_id,
             created_at=_now(), updated_at=_now())
-        self.store.put_task(child.model_dump(mode="json"))
+        with self._lock:
+            child.seq = self._next_seq()
+            self.store.put_task(child.model_dump(mode="json"))
         self.store.put_plan(plan.model_dump(mode="json"))
         self._audit(child_id, operator, "task_created", {
             "text": child.text, "parent_task_id": task_id,
@@ -2419,8 +2457,10 @@ class CopilotService:
             records.append(record)
         batch = Batch(batch_id=batch_id, created_by=operator,
                       created_at=_now(), members=records)
-        self.store.upsert_record("batches", {
-            "id": batch_id, **batch.model_dump(mode="json")})
+        with self._lock:
+            batch.seq = self._next_seq()
+            self.store.upsert_record("batches", {
+                "id": batch_id, **batch.model_dump(mode="json")})
         self._audit(BATCH_AUDIT_SCOPE, operator, "batch_created", {
             "batch_id": batch_id,
             "members": [r.model_dump(mode="json") for r in records]})
@@ -2434,12 +2474,20 @@ class CopilotService:
         return Batch(**raw)
 
     def list_batches(self) -> list[Batch]:
+        """Every batch, in submission order — the creation
+        sequence the service stamped at first storage. That
+        number is the guarantee: `created_at` has one-second
+        granularity, so two batches submitted in the same second
+        tie on it, and ordering the tie by the random batch id
+        made the list a coin flip. Batches stored before the
+        sequence existed carry 0 and fall back to (created_at,
+        batch_id) behind it."""
         batches = []
         for raw in self.store.list_records("batches"):
             raw = {k: v for k, v in raw.items() if k != "id"}
             batches.append(Batch(**raw))
         return sorted(batches,
-                      key=lambda b: (b.created_at, b.batch_id))
+                      key=lambda b: (b.seq, b.created_at, b.batch_id))
 
     def batch_audit(self) -> list[dict]:
         return self.store.list_audit(BATCH_AUDIT_SCOPE)
