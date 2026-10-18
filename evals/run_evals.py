@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from page_agent_copilot.batches import BatchMemberIn  # noqa: E402
 from page_agent_copilot.config import Settings  # noqa: E402
 from page_agent_copilot.models import (  # noqa: E402
     AmendChangeIn,
@@ -1025,6 +1026,180 @@ def _():
         health = svc.template_health(template)
         expect(health["ok"],
                f"{template.name} v{template.version}: {health}")
+
+
+# -- Round 8: batch work, without bulk decisions ---------------------------
+# A batch groups tasks submitted together and decides nothing
+# about any of them: each member is stated through ordinary
+# intake and takes its whole lifecycle per task, under the same
+# gates. The run sheet names each member's next act and who may
+# take it; the report folds from the member records — counts by
+# state, and a credited total read from the members' stored
+# verification reports, never from their plans.
+
+def _text(text):
+    return BatchMemberIn(text=text)
+
+
+def _template(name, slots):
+    return BatchMemberIn(template=name, slots=slots)
+
+
+@case("batch: a mixed submission completes per-task, report reconciles")
+def _():
+    from decimal import Decimal
+    svc = fresh()
+    batch = svc.create_batch("op", [
+        _text(CREDIT),
+        _text("raise a credit memo for invoice 4471, reason "
+              "goodwill, $900"),
+        _template("credit-memo", {
+            "invoice": "4472", "reason": "short shipment",
+            "amount": "75"}),
+        _text("raise a credit memo for invoice 4475, reason "
+              "damaged goods, $200 and mark invoice 4475 as paid"),
+    ])
+    members = batch.members
+    expect([m.position for m in members] == [1, 2, 3, 4],
+           "submission order lost")
+    states = [svc.get_task(m.task_id).status if m.task_id else None
+              for m in members]
+    expect(states == [TaskStatus.PLANNED, TaskStatus.REFUSED,
+                      TaskStatus.PLANNED, TaskStatus.PLANNED],
+           f"member states {states}")
+    # The refused member is in the batch, reason showing.
+    refused = svc.get_task(members[1].task_id)
+    expect("credit_above_cap" in (refused.refusal_reason or ""),
+           f"refusal {refused.refusal_reason}")
+    # The run sheet names each owing member's next act: confirm,
+    # by a second person — never the batch, never in bulk.
+    sheet = svc.batch_run_sheet(batch)
+    expect(sheet["status"] == "open", f"sheet status {sheet['status']}")
+    expect(sheet["owing"] == [members[0].task_id,
+                              members[2].task_id,
+                              members[3].task_id],
+           f"owing {sheet['owing']}")
+    for row in sheet["members"]:
+        if row["task_id"] in sheet["owing"]:
+            expect(row["next_act"]["action"] == "confirm",
+                   f"next act {row['next_act']}")
+            expect("other than the planner" in row["next_act"]["who"],
+                   f"who {row['next_act']['who']}")
+        else:
+            expect(row["next_act"]["action"] is None,
+                   "a refused member still owes an act")
+    # Per-task acts complete the batch: confirm + execute each
+    # member at its own door.
+    for member in (members[0], members[2], members[3]):
+        svc.confirm(member.task_id, "s.hale")
+        task = svc.execute(member.task_id, "offline")
+        expect(task.status == TaskStatus.VERIFIED,
+               f"{member.task_id} status {task.status}")
+    report = svc.batch_report(batch)
+    expect(report["complete"] is True, f"report {report}")
+    expect(report["counts_by_state"] == {"REFUSED": 1,
+                                         "VERIFIED": 3},
+           f"counts {report['counts_by_state']}")
+    expect(report["owing_acts"] == [], "acts still owing")
+    # The credited total is the verification reports' own sum:
+    # recompute it from the stored reports and compare exactly.
+    expected = Decimal("0.00")
+    for member in (members[0], members[2], members[3]):
+        rep = svc.get_verification(member.task_id)
+        expect(rep is not None and rep.ok, "no passing report")
+        for check in rep.field_checks:
+            if (check.record_kind == "credit_memos"
+                    and check.field == "amount"
+                    and check.verdict == "match"):
+                expected += Decimal(check.actual)
+    expect(expected == Decimal("395.00"), f"expected {expected}")
+    expect(report["total_credited"] == "395.00",
+           f"credited {report['total_credited']}")
+    expect(len(svc.store.list_records("credit_memos")) == 3,
+           "the memos on the records disagree with the report")
+    # The batch record itself never moved: no stored status was
+    # updated into place — completion is the fold, read fresh.
+    raw = svc.store.get_record("batches", batch.batch_id)
+    expect("status" not in raw and "complete" not in raw,
+           "the batch record carries a stored outcome")
+
+
+@case("batch: one member goes stale, the other verifies regardless")
+def _():
+    svc = fresh()
+    batch = svc.create_batch("op", [
+        _text("mark order 1032 as shipped"),
+        _text("mark order 1036 as packed"),
+    ])
+    stale_id, fine_id = (m.task_id for m in batch.members)
+    svc.confirm(stale_id, "s.hale")
+    svc.confirm(fine_id, "s.hale")
+    apply_field_change(svc.store, "orders", "1032", "carrier",
+                       "FedEx")
+    try:
+        svc.execute(stale_id, "offline")
+        expect(False, "a stale plan executed")
+    except GateError:
+        pass
+    expect(svc.get_task(stale_id).status == TaskStatus.STALE,
+           "member A did not go stale")
+    # Member B's lifecycle is untouched by A's staleness.
+    task = svc.execute(fine_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED,
+           f"member B status {task.status}")
+    expect(svc.store.get_record("orders", "1036")["status"]
+           == "packed", "member B's write did not land")
+    report = svc.batch_report(batch)
+    expect(report["complete"] is False, "batch closed early")
+    expect(report["counts_by_state"] == {"STALE": 1, "VERIFIED": 1},
+           f"counts {report['counts_by_state']}")
+    expect([o["task_id"] for o in report["owing_acts"]] == [stale_id],
+           f"owing {report['owing_acts']}")
+    expect(report["owing_acts"][0]["next_act"] == "replan",
+           "the owing act is not the re-plan")
+    # A's own way back completes the batch.
+    svc.replan(stale_id, "op")
+    svc.confirm(stale_id, "s.hale")
+    task = svc.execute(stale_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED,
+           f"member A status {task.status}")
+    expect(svc.batch_report(batch)["complete"] is True,
+           "the batch did not complete")
+
+
+@case("batch: a lying bridge credits nothing; the member's exit closes it")
+def _():
+    svc = fresh()
+    batch = svc.create_batch("op", [
+        _text(CREDIT),
+        _text("raise a credit memo for invoice 4472, reason "
+              "short shipment, $80"),
+    ])
+    good, bad = (m.task_id for m in batch.members)
+    svc.confirm(good, "s.hale")
+    svc.execute(good, "offline")
+    svc.confirm(bad, "s.hale")
+    svc.execute(bad, "page-agent-live")
+    task = svc.report_step(bad, 1, StepReportIn(ok=True))
+    expect(task.status == TaskStatus.DISCREPANCY,
+           f"status {task.status}")
+    report = svc.batch_report(batch)
+    # The discrepancy member's planned $80 is not credited —
+    # only the verified member's $120, from its report.
+    expect(report["total_credited"] == "120.00",
+           f"credited {report['total_credited']}")
+    expect(len(report["discrepancies_open"]) == 1
+           and report["discrepancies_open"][0]["task_id"] == bad
+           and report["discrepancies_open"][0]["diffs"],
+           f"discrepancies {report['discrepancies_open']}")
+    expect(report["complete"] is False,
+           "a discrepancy closed the batch")
+    svc.accept_deviation(bad, "s.hale",
+                         "the memo was issued by hand instead")
+    report = svc.batch_report(batch)
+    expect(report["complete"] is True, "the batch did not close")
+    expect(report["total_credited"] == "120.00",
+           "accepting a deviation rewrote the credited total")
 
 
 def main() -> int:
