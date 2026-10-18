@@ -89,6 +89,19 @@ STATUS_CLAUSE_RE = re.compile(
 AND_INVOICE_STATUS_RE = re.compile(
     r"\band\s+(?:mark|set)\s+invoice\s+(\d+)\s+"
     r"(?:as|to|status\s+to)\s+([a-z]+)", re.I)
+# The cross-page tail (round 12): "... and update the customer's
+# email to creditnotes@harbourview.example". The customer is never
+# named in the clause — the plan takes the invoice's customer from
+# the invoice record, so a credit task can only ever touch the
+# customer the credit belongs to.
+AND_CUSTOMER_UPDATE_RE = re.compile(
+    r"\band\s+update\s+(?:the\s+)?customer(?:'s)?\s+([a-z ]+?)"
+    r"\s+to\s+(.+)$", re.I | re.S)
+# A customer update asked for inside a credit task in any other
+# shape — a named customer, a missing value — matches this and no
+# governed tail: refused, never silently dropped.
+AND_CUSTOMER_LOOSE_RE = re.compile(
+    r"\band\s+update\s+(?:the\s+)?customers?\b", re.I)
 # Shipment with its details in one breath: "mark order 1032 as
 # shipped, ship date 2026-10-20, carrier DHL" — three SET steps on
 # one record, in the governed order status -> ship_date -> carrier.
@@ -181,7 +194,7 @@ def _plan_credit_memo(text: str, store: Store, policy: Policy,
             "refused: a credit memo task must name its invoice "
             "(e.g. 'invoice 4471')")
     invoice_id = inv.group(1)
-    _require_record(store, "invoices", invoice_id)
+    invoice = _require_record(store, "invoices", invoice_id)
     amounts = list(AMOUNT_RE.finditer(text))
     if not amounts:
         raise PlanRefusal(
@@ -212,21 +225,77 @@ def _plan_credit_memo(text: str, store: Store, policy: Policy,
         "status": "issued",
     }
     steps = [_credit_step(1, fields)]
-    # The desk's compound ask: the memo, and then the invoice is
-    # settled in the same task ("... and mark invoice 4471 as
-    # paid"). The follow-up is a step on a second record, planned
-    # and policy-checked like any other, sequenced after the memo.
+    # The desk's compound asks ride on the memo as governed tail
+    # clauses, sequenced after it in the order they were spoken:
+    # the invoice settled in the same task ("... and mark invoice
+    # 4471 as paid") — a step on a second record — and, round 12,
+    # the invoice's customer updated in the same task ("... and
+    # update the customer's email to ...") — a step on a second
+    # record kind and a second console page, the plan's one
+    # genuinely cross-page shape. Each tail is planned and
+    # policy-checked like any other step.
+    tails: list[tuple[int, str, PlanStep]] = []
     tail = AND_INVOICE_STATUS_RE.search(text)
     if tail:
         follow_id, follow_value = tail.group(1), tail.group(2).lower()
         _require_record(store, "invoices", follow_id)
         check_field_change("invoices", "status", follow_value)
-        steps.append(_set_step(2, "invoices", follow_id, "status",
-                               follow_value))
+        tails.append((tail.start(), "invoice_status",
+                      _set_step(0, "invoices", follow_id, "status",
+                                follow_value)))
+    cust = AND_CUSTOMER_UPDATE_RE.search(text)
+    if cust:
+        phrase = " ".join(cust.group(1).lower().split())
+        field = FIELD_PHRASES.get(phrase)
+        if field is None:
+            raise PlanRefusal(
+                "no_plan_derivable",
+                f"refused: '{phrase}' is not a field the planner "
+                f"can name; the planner never guesses which field "
+                f"was meant")
+        # The value runs to the end of the task, or to a settle
+        # clause spoken after it — never through one.
+        value_end = len(text)
+        if tail and tail.start() > cust.start():
+            value_end = tail.start()
+        value = text[cust.start(2):value_end].strip().rstrip(",").strip()
+        if not value:
+            raise PlanRefusal(
+                "no_plan_derivable",
+                "refused: the customer update names no value; the "
+                "planner never invents one")
+        customer_id = invoice.get("customer_id")
+        if not customer_id:
+            raise PlanRefusal(
+                "no_plan_derivable",
+                f"refused: invoice {invoice_id} names no customer; "
+                f"there is no customer record for the credit to "
+                f"update")
+        _require_record(store, "customers", str(customer_id))
+        check_field_change("customers", field, value)
+        tails.append((cust.start(), "customer_update",
+                      _set_step(0, "customers", str(customer_id),
+                                field, value)))
+    elif AND_CUSTOMER_LOOSE_RE.search(text):
+        # A customer update was asked for in a shape the grammar
+        # does not govern — a named customer, a missing value.
+        # Refuse it whole; dropping the clause quietly would plan
+        # less than the operator asked for.
+        raise PlanRefusal(
+            "no_plan_derivable",
+            "refused: a credit task updates the invoice's customer "
+            "only in the governed form \"and update the customer's "
+            "<field> to <value>\" — the customer is the invoice's "
+            "customer, read from the record, never a customer named "
+            "in the text")
+    tails.sort(key=lambda t: t[0])
+    for seq, (_, _, step) in enumerate(tails, start=2):
+        step.seq = seq
+        steps.append(step)
+    type_suffix = "".join(f"_and_{name}" for _, name, _ in tails)
     return Plan(
         task_id=task_id,
-        task_type=("credit_memo" if len(steps) == 1
-                   else "credit_memo_and_invoice_status"),
+        task_type=f"credit_memo{type_suffix}",
         summary=_summarize(steps),
         steps=steps)
 

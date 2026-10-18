@@ -360,6 +360,43 @@ DEFAULT_TEMPLATES: list[dict] = [
         }],
     },
     {
+        "name": "credit-memo-and-customer-update",
+        "version": 1,
+        "pattern": ("raise a credit memo for invoice {invoice}, "
+                    "reason {reason}, ${amount} and update the "
+                    "customer's {field} to {value}"),
+        "description": (
+            "The credit, and the customer's record kept in step "
+            "with it in the same task: the memo is issued on the "
+            "Invoices page and one field on the invoice's "
+            "customer is updated on the Customers page — a "
+            "cross-page plan. The customer is the invoice's, read "
+            "from the record; the pattern never names one."),
+        "slots": [
+            {"name": "invoice", "kind": "record",
+             "record_kind": "invoices"},
+            {"name": "reason", "kind": "text"},
+            {"name": "amount", "kind": "money"},
+            {"name": "field", "kind": "text"},
+            {"name": "value", "kind": "text"},
+        ],
+        "examples": [{
+            "slots": {"invoice": "4471", "reason": "damaged goods",
+                      "amount": "120", "field": "email",
+                      "value": "creditnotes@harbourview.example"},
+            "task_type": "credit_memo_and_customer_update",
+            "steps": [
+                {"action": "create", "record_kind": "credit_memos",
+                 "fields": {"invoice_id": "4471", "amount": "120.00",
+                            "reason": "damaged goods",
+                            "status": "issued"}},
+                {"action": "set", "record_kind": "customers",
+                 "record_id": "2041", "field": "email",
+                 "value": "creditnotes@harbourview.example"},
+            ],
+        }],
+    },
+    {
         "name": "ship-order",
         "version": 1,
         "pattern": ("mark order {order} as shipped, ship date "

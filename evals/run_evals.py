@@ -1028,7 +1028,7 @@ def _():
 def _():
     svc = fresh()
     templates = svc.list_templates()
-    expect(len(templates) == 6, f"{len(templates)} templates seeded")
+    expect(len(templates) == 7, f"{len(templates)} templates seeded")
     for template in templates:
         health = svc.template_health(template)
         expect(health["ok"],

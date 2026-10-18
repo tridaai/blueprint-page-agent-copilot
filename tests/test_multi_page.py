@@ -70,8 +70,114 @@ def test_pages_are_served_as_data():
 
 # --------------------------------------------------------- the plan span
 
+def test_a_cross_page_plan_says_so(service):
+    task = service.intake(CREDIT_AND_CUSTOMER, "op")
+    plan = service.get_plan(task.task_id)
+    assert plan.pages == ["Invoices", "Customers"]
+    assert plan.is_multi_page is True
+
+
 def test_a_single_page_plan_is_not_a_multi_page_flow(service):
     task = service.intake("mark order 1032 as shipped", "op")
     plan = service.get_plan(task.task_id)
     assert plan.pages == ["Orders"]
     assert plan.is_multi_page is False
+
+
+def test_the_api_serves_the_plan_span():
+    app = create_app(Settings.from_env(), InMemoryStore(), seed=True)
+    client = TestClient(app)
+    body = client.post("/api/tasks", json={
+        "text": CREDIT_AND_CUSTOMER, "operator": "op"}).json()
+    assert body["plan"]["pages"] == ["Invoices", "Customers"]
+    assert body["plan"]["multi_page"] is True
+    detail = client.get(f"/api/tasks/{body['task']['task_id']}").json()
+    assert detail["plan"]["pages"] == ["Invoices", "Customers"]
+    assert detail["plan"]["multi_page"] is True
+
+
+# --------------------------------------------------- the cross-page shape
+
+def test_the_cross_page_shape_plans_two_pages_two_kinds(service):
+    task = service.intake(CREDIT_AND_CUSTOMER, "op")
+    assert task.status == TaskStatus.PLANNED, task.refusal_reason
+    plan = service.get_plan(task.task_id)
+    assert plan.task_type == "credit_memo_and_customer_update"
+    create, update = plan.steps
+    assert create.action.value == "create"
+    assert create.page == "Invoices"
+    assert create.fields == {
+        "invoice_id": "4471", "amount": "120.00",
+        "reason": "damaged goods", "status": "issued"}
+    # The customer step names the invoice's customer — from the
+    # record (invoice 4471 belongs to customer 2041), never from
+    # the task text, which names no customer at all.
+    assert update.action.value == "set"
+    assert update.page == "Customers"
+    assert update.record_kind == "customers"
+    assert update.record_id == "2041"
+    assert update.field == "email"
+    assert update.value == "creditnotes@harbourview.example"
+
+
+def test_the_cross_page_shape_verifies_end_to_end(service):
+    task = plan_and_confirm(service)
+    before = service.store.get_record("customers", "2041")
+    task = service.execute(task.task_id, "offline")
+    assert task.status == TaskStatus.VERIFIED
+    memos = service.store.list_records("credit_memos")
+    assert len(memos) == 1 and memos[0]["invoice_id"] == "4471"
+    after = service.store.get_record("customers", "2041")
+    changed = {k for k in after if after[k] != before[k]}
+    assert changed == {"email"}
+    assert after["email"] == "creditnotes@harbourview.example"
+    report = service.get_verification(task.task_id)
+    assert report.ok
+    links = [c for c in report.linkage_checks
+             if c.check == "invoice_customer_link"]
+    assert len(links) == 1 and links[0].verdict == "match"
+    assert links[0].expected == "2041" and links[0].actual == "2041"
+
+
+def test_the_cross_page_shape_combines_with_the_settle_tail(service):
+    text = ("raise a credit memo for invoice 4471, reason damaged "
+            "goods, $120 and update the customer's email to "
+            "creditnotes@harbourview.example and mark invoice "
+            "4471 as paid")
+    task = service.intake(text, "op")
+    assert task.status == TaskStatus.PLANNED, task.refusal_reason
+    plan = service.get_plan(task.task_id)
+    assert plan.task_type == ("credit_memo_and_customer_update"
+                              "_and_invoice_status")
+    assert [(s.record_kind, s.page) for s in plan.steps] == [
+        ("credit_memos", "Invoices"), ("customers", "Customers"),
+        ("invoices", "Invoices")]
+    # The customer value stops at the settle clause — it is not
+    # swallowed into the email.
+    assert plan.steps[1].value == "creditnotes@harbourview.example"
+    service.confirm(task.task_id, "s.hale")
+    task = service.execute(task.task_id, "offline")
+    assert task.status == TaskStatus.VERIFIED
+    assert service.store.get_record(
+        "invoices", "4471")["status"] == "paid"
+
+
+def test_a_named_customer_in_a_credit_task_is_refused(service):
+    # The shape never names a customer: asking for a different one
+    # is refused whole, not quietly redirected and not dropped.
+    task = service.intake(
+        "raise a credit memo for invoice 4471, reason damaged "
+        "goods, $120 and update customer 2042 email to "
+        "x@harbourview.example", "op")
+    assert task.status == TaskStatus.REFUSED
+    assert task.refusal_reason.startswith("no_plan_derivable")
+    assert service.store.list_records("credit_memos") == []
+
+
+def test_the_cross_page_shape_refuses_a_payment_field(service):
+    task = service.intake(
+        "raise a credit memo for invoice 4471, reason damaged "
+        "goods, $120 and update the customer's bank account to "
+        "GB00XXXX", "op")
+    assert task.status == TaskStatus.REFUSED
+    assert task.refusal_reason.startswith("payment_field")

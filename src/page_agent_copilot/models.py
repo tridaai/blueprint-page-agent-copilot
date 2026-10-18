@@ -400,6 +400,7 @@ class LinkageCheck(BaseModel):
     record_id: str
     check: str  # created_for_task | memo_customer | invoice_customer
                 # | invoice_reflects_memo | customer_link
+                # | invoice_customer_link
                 # | execution_record
     field: str  # the field a failure is named under in the diffs
     expected: Optional[str] = None

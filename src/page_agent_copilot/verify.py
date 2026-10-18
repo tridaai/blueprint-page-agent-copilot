@@ -21,9 +21,11 @@ Two kinds of checks, one verdict:
   names this task as its creator, names the customer of the
   invoice it was planned against, and is listed back on that
   invoice's memo list; the invoice's customer exists; a touched
-  order or invoice still names a customer that exists; and the
-  execution record in the audit trail — who ran each step, when —
-  agrees with the state the re-read found.
+  order or invoice still names a customer that exists; a customer
+  a cross-page plan updates is the customer of the invoice its
+  credit memo was planned against; and the execution record in
+  the audit trail — who ran each step, when — agrees with the
+  state the re-read found.
 
 An exact match across every check is the only path to VERIFIED.
 Every failure is a named FieldDiff — field checks first, in plan
@@ -139,6 +141,33 @@ def run_verification(reads: ConsoleReads, plan: Plan,
                            f"{step.record_id} names customer {cid}"
                            + ("" if customer is not None
                               else ", who does not exist")))
+            if step.record_kind == "customers":
+                # The cross-page tie (round 12): when this plan also
+                # creates a credit memo, the customer it updates
+                # must be the customer of the invoice the memo was
+                # planned against — the two halves of the flow hang
+                # on the same customer, or the plan did not do what
+                # it said across the page boundary.
+                for other in plan.steps:
+                    if other.action != StepAction.CREATE:
+                        continue
+                    inv_id = other.fields.get("invoice_id", "")
+                    inv = reads.get("invoices", inv_id)
+                    expected = (str(inv["customer_id"])
+                                if inv is not None else None)
+                    hit = (expected is not None
+                           and step.record_id == expected)
+                    linkage_checks.append(LinkageCheck(
+                        seq=step.seq, record_kind="customers",
+                        record_id=step.record_id or "",
+                        check="invoice_customer_link",
+                        field="customer_id", expected=expected,
+                        actual=step.record_id,
+                        verdict="match" if hit else "mismatch",
+                        detail=f"this plan's credit memo is against "
+                               f"invoice {inv_id}, whose customer is "
+                               f"{expected}; the step updates "
+                               f"customer {step.record_id}"))
             linkage_checks.append(_execution_check(
                 step, audit, record_kind=step.record_kind,
                 record_id=step.record_id or "",

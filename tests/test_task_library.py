@@ -20,9 +20,9 @@ from page_agent_copilot.templates import (
     load_template,
 )
 
-SEEDED_NAMES = ["credit-memo", "credit-memo-and-settle",
-                "customer-update", "invoice-status", "order-status",
-                "ship-order"]
+SEEDED_NAMES = ["credit-memo", "credit-memo-and-customer-update",
+                "credit-memo-and-settle", "customer-update",
+                "invoice-status", "order-status", "ship-order"]
 
 ORDER_STATUS_V2 = {
     "name": "order-status",
