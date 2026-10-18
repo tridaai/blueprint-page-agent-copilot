@@ -69,12 +69,30 @@ force at that moment — a role narrowed after confirmation holds the
 task at CONFIRMED, refused and recorded, until the definition
 allows it again. Every permission refusal is written to the audit
 trail before it is raised.
+
+Every act is also an *identity* act (roles.py, round 6). The
+operator directory is governed: names are enrolled, assigned a
+role, deactivated, and reactivated only through recorded
+supervisor acts, and a deactivated name can perform no act at
+all — every entry point refuses it, recorded, with the code
+`operator_inactive`. Deactivation is a state, never a deletion:
+the name stays in the directory so its history keeps resolving,
+and its unfinished work is never reassigned or deleted — it
+surfaces as orphaned work until a supervisor picks it up as a
+recorded act, with the original planner kept on the task. Two
+reads close the loop: an attribution check that scans the whole
+audit trail for an act whose actor resolves neither to a
+directory name (in any state) nor to one of the shell's named
+system components, and a per-operator report folded from the
+audit — never from counters — so what a name did, and what was
+refused to it, reads off the same trail.
 """
 
 from __future__ import annotations
 
 import threading
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -113,6 +131,7 @@ from .roles import (
     DEFAULT_OPERATORS,
     DEFAULT_ROLES,
     ROLE_AUDIT_SCOPE,
+    SYSTEM_ACTORS,
     RoleDefinition,
     RoleError,
     describe_problem,
@@ -131,6 +150,17 @@ def _now() -> str:
 
 class GateError(Exception):
     """A state-machine refusal (HTTP 409 at the API)."""
+
+
+# The states in which a task still owes its operator an act —
+# planned and awaiting confirmation, confirmed and not yet
+# executed, stale and awaiting a re-plan, failed and awaiting a
+# recovery act. Work in one of these states whose operator has
+# been deactivated is orphaned work (see `orphaned_work`).
+ORPHANED_STATUSES = (
+    TaskStatus.PLANNED, TaskStatus.CONFIRMED, TaskStatus.STALE,
+    TaskStatus.EXECUTION_FAILED,
+)
 
 
 class CopilotService:
@@ -192,11 +222,38 @@ class CopilotService:
         self._ensure_roles()
         return self.store.list_records("operators")
 
+    def directory_entry(self, operator: str) -> Optional[dict]:
+        """The directory entry a name resolves to, or None.
+
+        Resolution is normalised — a spacing or casing variant of
+        an enrolled name is that name, at act time exactly as at
+        enrolment — so the directory is scanned by normalised id
+        rather than read by exact key. The entry carries the
+        name's role and its active state; a deactivated name still
+        resolves (its history stays attributable) even though it
+        may perform no act."""
+        wanted = operator_named(operator)
+        if not wanted:
+            return None
+        for entry in self.list_operators():
+            if operator_named(entry["id"]) == wanted:
+                return entry
+        return None
+
+    @staticmethod
+    def entry_active(entry: dict) -> bool:
+        """Whether a directory entry may act. Entries seeded
+        before the directory round carry no flag; an absent flag
+        reads as active, and every write since carries it."""
+        return bool(entry.get("active", True))
+
     def role_of(self, operator: str) -> Optional[RoleDefinition]:
         """The role an operator name holds, or None: an unknown
-        name holds no role and may do nothing."""
-        self._ensure_roles()
-        entry = self.store.get_record("operators", operator)
+        name holds no role and may do nothing. A deactivated name
+        still holds its role — the role is what the record says;
+        whether the name may *act* is the active check every entry
+        point runs beside this one."""
+        entry = self.directory_entry(operator)
         if entry is None:
             return None
         return self.get_role(entry["role"])
@@ -211,6 +268,13 @@ class CopilotService:
         loader; the change — who, when, and the field-level diff —
         is written to the roles audit scope before it takes effect.
         A refused edit stores nothing."""
+        actor_entry = self.directory_entry(actor)
+        if actor_entry is not None and not self.entry_active(
+                actor_entry):
+            raise GateError(
+                f"'{actor}' may not edit role definitions: the "
+                f"name is deactivated (operator_inactive) — a "
+                f"deactivated operator performs no acts")
         actor_role = self.role_of(actor)
         if actor_role is None or not actor_role.can_administer:
             raise GateError(
@@ -233,25 +297,203 @@ class CopilotService:
             "role": name, "changes": changes})
         return candidate
 
+    # -- the operator directory --------------------------------------
+    # Enrolment, role assignment, deactivation, and reactivation
+    # are recorded supervisor acts, kept in the same roles audit
+    # scope as the role edits: the act, the actor, the target, and
+    # the before/after ride the entry. A name is never deleted —
+    # deactivation is a state on its entry — so the trail a name
+    # left keeps resolving to it.
+
+    def _directory_refused(self, actor: str, act: str, target: str,
+                           code: str, reason: str) -> None:
+        self._audit(ROLE_AUDIT_SCOPE, actor, "directory_refused", {
+            "act": act, "target": target, "code": code,
+            "reason": reason})
+        raise GateError(f"{act} refused: {reason}")
+
+    def _directory_actor(self, actor: str, act: str,
+                         target: str) -> dict:
+        """The gate every directory act passes: the acting name
+        must be enrolled, active, and holding a role that may
+        administer. Each refusal is recorded before it raises."""
+        entry = self.directory_entry(actor)
+        if entry is None:
+            self._directory_refused(
+                actor, act, target, "unknown_operator",
+                f"'{actor}' holds no role in the operator "
+                f"directory; directory administration is a "
+                f"supervisor act")
+        if not self.entry_active(entry):
+            self._directory_refused(
+                actor, act, target, "operator_inactive",
+                f"'{actor}' is deactivated (operator_inactive) — "
+                f"a deactivated operator performs no acts")
+        role = self.get_role(entry["role"])
+        if role is None or not role.can_administer:
+            self._directory_refused(
+                actor, act, target, "role_cannot_administer",
+                f"'{actor}' may not administer the operator "
+                f"directory: the act needs a role with "
+                f"can_administer (a supervisor)")
+        return entry
+
+    def _directory_target(self, actor: str, act: str,
+                          name: str) -> dict:
+        entry = self.directory_entry(name)
+        if entry is None:
+            self._directory_refused(
+                actor, act, name, "operator_not_found",
+                f"there is no operator named '{name}' in the "
+                f"directory")
+        return entry
+
+    def enroll_operator(self, actor: str, name: str,
+                        role_name: str) -> dict:
+        """Enrol a name in the directory, with a role. The name is
+        stored normalised, and enrolling a name the directory
+        already holds — active or deactivated — is refused: a
+        deactivated name comes back by reactivation, not by a
+        second enrolment that would fork its history."""
+        canonical = operator_named(name)
+        self._directory_actor(actor, "enrolment", canonical)
+        if not canonical:
+            self._directory_refused(
+                actor, "enrolment", name, "invalid_name",
+                "an operator name may not be empty")
+        existing = self.directory_entry(canonical)
+        if existing is not None:
+            state = ("active" if self.entry_active(existing)
+                     else "deactivated")
+            self._directory_refused(
+                actor, "enrolment", canonical, "operator_exists",
+                f"'{canonical}' is already in the directory "
+                f"({state}, role '{existing['role']}'); a name is "
+                f"enrolled once — a deactivated name returns by "
+                f"reactivation")
+        if self.get_role(role_name) is None:
+            raise RoleError(
+                "role_not_found",
+                f"there is no role named '{role_name}' to assign")
+        entry = {"id": canonical, "role": role_name, "active": True}
+        self.store.upsert_record("operators", entry)
+        self._audit(ROLE_AUDIT_SCOPE, actor, "operator_enrolled", {
+            "operator": canonical, "role": role_name})
+        return entry
+
+    def assign_operator_role(self, actor: str, name: str,
+                             role_name: str) -> dict:
+        """Change the role an enrolled name holds — a recorded
+        act carrying the before and after. Assigning the role the
+        name already holds changes nothing and is refused."""
+        self._directory_actor(actor, "role assignment", name)
+        entry = self._directory_target(actor, "role assignment",
+                                       name)
+        if self.get_role(role_name) is None:
+            raise RoleError(
+                "role_not_found",
+                f"there is no role named '{role_name}' to assign")
+        if entry["role"] == role_name:
+            self._directory_refused(
+                actor, "role assignment", entry["id"],
+                "no_change",
+                f"'{entry['id']}' already holds the role "
+                f"'{role_name}'; the assignment changes nothing")
+        updated = {**entry, "role": role_name}
+        self.store.upsert_record("operators", updated)
+        self._audit(ROLE_AUDIT_SCOPE, actor,
+                    "operator_role_changed", {
+                        "operator": entry["id"],
+                        "old_role": entry["role"],
+                        "new_role": role_name})
+        return updated
+
+    def deactivate_operator(self, actor: str, name: str) -> dict:
+        """Deactivate a name: it may perform no act from this
+        moment, and its unfinished work surfaces as orphaned (see
+        `orphaned_work`) rather than moving or vanishing. The one
+        deactivation the shell refuses outright is the last active
+        administrator's — a directory nobody can administer is a
+        lockout, not a governance act."""
+        self._directory_actor(actor, "deactivation", name)
+        entry = self._directory_target(actor, "deactivation", name)
+        if not self.entry_active(entry):
+            self._directory_refused(
+                actor, "deactivation", entry["id"],
+                "already_inactive",
+                f"'{entry['id']}' is already deactivated")
+        role = self.get_role(entry["role"])
+        if role is not None and role.can_administer:
+            peers = [e for e in self.list_operators()
+                     if e["id"] != entry["id"]
+                     and self.entry_active(e)
+                     and (self.get_role(e["role"]) is not None
+                          and self.get_role(e["role"]).can_administer)]
+            if not peers:
+                self._directory_refused(
+                    actor, "deactivation", entry["id"],
+                    "last_administrator",
+                    f"'{entry['id']}' is the directory's last "
+                    f"active administrator; deactivating it would "
+                    f"leave nobody able to administer the "
+                    f"directory — enrol or assign another "
+                    f"administrator first")
+        updated = {**entry, "active": False}
+        self.store.upsert_record("operators", updated)
+        self._audit(ROLE_AUDIT_SCOPE, actor,
+                    "operator_deactivated", {
+                        "operator": entry["id"],
+                        "role": entry["role"]})
+        return updated
+
+    def reactivate_operator(self, actor: str, name: str) -> dict:
+        """Bring a deactivated name back: the same entry, the same
+        role, its whole history still attached — reactivation is
+        the only route back, and it is recorded like the
+        deactivation was."""
+        self._directory_actor(actor, "reactivation", name)
+        entry = self._directory_target(actor, "reactivation", name)
+        if self.entry_active(entry):
+            self._directory_refused(
+                actor, "reactivation", entry["id"],
+                "already_active",
+                f"'{entry['id']}' is already active")
+        updated = {**entry, "active": True}
+        self.store.upsert_record("operators", updated)
+        self._audit(ROLE_AUDIT_SCOPE, actor,
+                    "operator_reactivated", {
+                        "operator": entry["id"],
+                        "role": entry["role"]})
+        return updated
+
     # -- intake + planning ---------------------------------------------
     def intake(self, text: str, operator: str) -> Task:
         task_id = f"TASK-{uuid.uuid4().hex[:8].upper()}"
         task = Task(task_id=task_id, text=text, operator=operator,
+                    planned_by=operator,
                     created_at=_now(), updated_at=_now())
         self.store.put_task(task.model_dump(mode="json"))
         self._audit(task_id, operator, "task_created", {"text": text})
         try:
-            # The planner's role is checked before the plan exists:
-            # a name with no role, or a role that may not plan, is
-            # refused here — at plan time, recorded like any other
-            # plan refusal.
+            # The planner's identity is checked before the plan
+            # exists: a name with no directory entry, a deactivated
+            # name, or a role that may not plan is refused here —
+            # at plan time, recorded like any other plan refusal.
+            entry = self.directory_entry(operator)
             role = self.role_of(operator)
-            if role is None:
+            if entry is None or role is None:
                 raise PlanRefusal(
                     "unknown_operator",
                     f"refused: '{operator}' holds no role in the "
                     f"operator directory; an unknown operator may "
                     f"not plan work")
+            if not self.entry_active(entry):
+                raise PlanRefusal(
+                    "operator_inactive",
+                    f"refused: '{operator}' is deactivated "
+                    f"(operator_inactive); a deactivated operator "
+                    f"may not plan work — the name returns by a "
+                    f"supervisor's reactivation, not by acting")
             if not role.can_plan:
                 raise PlanRefusal(
                     "role_cannot_plan",
@@ -366,6 +608,16 @@ class CopilotService:
                 f"task {task_id} is {task.status.value}; only a PLANNED "
                 f"task's plan can be amended — a confirmed plan is "
                 f"executed as confirmed or rejected, never amended")
+        entry = self.directory_entry(operator)
+        if entry is not None and not self.entry_active(entry):
+            self._audit(task_id, operator, "amendment_refused", {
+                "code": "operator_inactive",
+                "reason": f"'{operator}' is deactivated; a "
+                          f"deactivated operator may not "
+                          f"amend plans"})
+            raise GateError(
+                f"amendment to task {task_id} refused: "
+                f"'{operator}' is deactivated (operator_inactive)")
         role = self.role_of(operator)
         if role is None or not role.can_amend:
             reason = (f"'{operator}' holds no role"
@@ -417,11 +669,24 @@ class CopilotService:
             "changes": [c.model_dump(mode="json") for c in recorded]})
         return task, amended, recorded
 
+    def _require_active_actor(self, task_id: str, operator: str,
+                              act: str) -> None:
+        """Fail closed on a deactivated actor, for the acts whose
+        refusals this state machine has never recorded (reject,
+        re-plan): a deactivated name performs no act, full stop."""
+        entry = self.directory_entry(operator)
+        if entry is not None and not self.entry_active(entry):
+            raise GateError(
+                f"{act} of task {task_id} refused: '{operator}' "
+                f"is deactivated (operator_inactive) — a "
+                f"deactivated operator performs no acts")
+
     def reject(self, task_id: str, operator: str) -> Task:
         """A human's no to a planned or confirmed task. Terminal:
         the operator states a fresh task if the work is still
         wanted, so no rejected plan can be revived into execution."""
         task = self._require_task(task_id)
+        self._require_active_actor(task_id, operator, "rejection")
         if task.status not in (TaskStatus.PLANNED, TaskStatus.CONFIRMED):
             raise GateError(
                 f"task {task_id} is {task.status.value}; only a PLANNED "
@@ -440,6 +705,7 @@ class CopilotService:
         longer support a plan at all, the task is REFUSED with the
         planner's reason — a re-plan cannot launder a refusal."""
         task = self._require_task(task_id)
+        self._require_active_actor(task_id, operator, "re-plan")
         if task.status != TaskStatus.STALE:
             raise GateError(
                 f"task {task_id} is {task.status.value}; only a STALE "
@@ -484,7 +750,21 @@ class CopilotService:
         # not be the planner: self-confirmation is refused for
         # every role (names compare normalised, so a spacing or
         # casing variant of the planner's name is still the
-        # planner). Both refusals are recorded before they raise.
+        # planner). Every refusal is recorded before it raises —
+        # including the deactivated confirmer's: a name that may
+        # perform no act is refused as itself, not as a stranger.
+        entry = self.directory_entry(operator)
+        if entry is not None and not self.entry_active(entry):
+            self._audit(task_id, operator, "confirmation_refused", {
+                "code": "operator_inactive",
+                "reason": f"'{operator}' is deactivated; a "
+                          f"deactivated operator may not "
+                          f"confirm plans",
+                "planner": task.operator,
+                "plan_version": task.plan_version})
+            raise GateError(
+                f"confirmation of task {task_id} refused: "
+                f"'{operator}' is deactivated (operator_inactive)")
         role = self.role_of(operator)
         if role is None or not role.can_confirm:
             code = ("unknown_operator" if role is None
@@ -594,6 +874,7 @@ class CopilotService:
             number = len(self.get_attempts(task.task_id)) + 1
             attempt = ExecutionAttempt(
                 task_id=task.task_id, number=number, driver=driver,
+                executor=actor,
                 plan_version=plan.version, mode=mode,
                 base_attempt=(number if base_attempt is None
                               else base_attempt),
@@ -716,7 +997,8 @@ class CopilotService:
         self._save(task)
         self._audit(task.task_id, attempt.driver, "execution_failed", {
             "attempt": attempt.number, "mode": attempt.mode,
-            "driver": attempt.driver, "plan_version": plan.version,
+            "driver": attempt.driver, "executor": attempt.executor,
+            "plan_version": plan.version,
             "failed_seq": failed.seq, "error": failed.detail,
             "completed_steps": [o.seq for o in attempt.steps if o.ok],
             "partial_state": attempt.state_lines})
@@ -735,6 +1017,7 @@ class CopilotService:
         self._audit(task.task_id, attempt.driver,
                     "execution_completed", {
                         "driver": attempt.driver,
+                        "executor": attempt.executor,
                         "attempt": attempt.number,
                         "mode": attempt.mode,
                         "steps": len(plan.steps)})
@@ -800,6 +1083,7 @@ class CopilotService:
         # refused, recorded, still CONFIRMED, nothing run — until
         # the definitions allow the plan again.
         executor = operator if operator is not None else task.operator
+        self._refuse_inactive_executor(task, plan, executor)
         checks: list[tuple[str, Optional[RoleDefinition]]] = [
             ("planner", self.role_of(task.operator)),
             ("executor", self.role_of(executor)),
@@ -866,7 +1150,7 @@ class CopilotService:
         # re-execution of a task that already ran its course is
         # refused by the status check above — VERIFIED is final.
         attempt = self._claim_attempt(task, plan, driver, "execute",
-                                      1, task.operator)
+                                      1, executor)
         if driver == DRIVER_LIVE:
             # The agent runs in the operator's browser; the bridge
             # reports each step back. The attempt stays running —
@@ -931,6 +1215,31 @@ class CopilotService:
         return self._complete_attempt(task, plan, attempt)
 
     # -- failure recovery --------------------------------------------------
+    def _refuse_inactive_executor(self, task: Task, plan: Plan,
+                                  executor: str) -> None:
+        """The identity half of the execution gate: an executor
+        whose directory entry stands deactivated is refused as
+        themselves — `operator_inactive`, recorded — before any
+        allowlist is consulted. (The planner's side is deliberately
+        not checked: a deactivated planner's confirmed work is
+        orphaned work for a supervisor to pick up, and its
+        allowlist check is about the plan, not the person.)"""
+        entry = self.directory_entry(executor)
+        if entry is not None and not self.entry_active(entry):
+            self._audit(task.task_id, executor,
+                        "execution_refused", {
+                            "code": "operator_inactive",
+                            "who": "executor",
+                            "reason": f"'{executor}' is "
+                                      f"deactivated; a deactivated "
+                                      f"operator may not execute "
+                                      f"plans",
+                            "plan_version": plan.version})
+            raise GateError(
+                f"execution of task {task.task_id} refused: "
+                f"'{executor}' is deactivated "
+                f"(operator_inactive)")
+
     def _execution_gate(self, task: Task, plan: Plan,
                         executor: str) -> None:
         """The execution-time role re-check for the recovery acts,
@@ -939,6 +1248,7 @@ class CopilotService:
         both the planner's allowlist and the executor's, against
         the definitions in force now. A refusal is recorded before
         it raises; the task stays EXECUTION_FAILED."""
+        self._refuse_inactive_executor(task, plan, executor)
         checks: list[tuple[str, Optional[RoleDefinition]]] = [
             ("planner", self.role_of(task.operator)),
             ("executor", self.role_of(executor)),
@@ -1205,6 +1515,16 @@ class CopilotService:
                 f"task {task_id} not abandoned: a reason is "
                 f"required — the record names the partial state "
                 f"and states why it stands")
+        entry = self.directory_entry(operator)
+        if entry is not None and not self.entry_active(entry):
+            self._audit(task_id, operator, "abandon_refused", {
+                "code": "operator_inactive",
+                "reason": f"'{operator}' is deactivated; a "
+                          f"deactivated operator may not abandon "
+                          f"executions"})
+            raise GateError(
+                f"task {task_id} not abandoned: '{operator}' is "
+                f"deactivated (operator_inactive)")
         role = self.role_of(operator)
         if role is None or not role.can_execute:
             why = (f"'{operator}' holds no role" if role is None
@@ -1344,6 +1664,16 @@ class CopilotService:
             raise GateError(
                 f"task {task_id} is {task.status.value}; only a "
                 f"DISCREPANCY task can spawn a corrective task")
+        entry = self.directory_entry(operator)
+        if entry is not None and not self.entry_active(entry):
+            self._audit(task_id, operator, "corrective_refused", {
+                "code": "operator_inactive",
+                "reason": f"'{operator}' is deactivated; a "
+                          f"deactivated operator may not plan "
+                          f"work, corrective or otherwise"})
+            raise GateError(
+                f"corrective task for {task_id} refused: "
+                f"'{operator}' is deactivated (operator_inactive)")
         role = self.role_of(operator)
         if role is None or not role.can_plan:
             code = ("unknown_operator" if role is None
@@ -1396,7 +1726,8 @@ class CopilotService:
             task_id=child_id,
             text=(f"Corrective for {task_id}: close the differences "
                   f"verification named in plan v{parent_plan.version}"),
-            operator=operator, status=TaskStatus.PLANNED,
+            operator=operator, planned_by=operator,
+            status=TaskStatus.PLANNED,
             plan_version=1, parent_task_id=task_id,
             created_at=_now(), updated_at=_now())
         self.store.put_task(child.model_dump(mode="json"))
@@ -1442,6 +1773,16 @@ class CopilotService:
                 f"deviation on task {task_id} not accepted: a "
                 f"reason is required — the acceptance names the "
                 f"differences and states why they stand")
+        entry = self.directory_entry(operator)
+        if entry is not None and not self.entry_active(entry):
+            self._audit(task_id, operator, "deviation_refused", {
+                "code": "operator_inactive",
+                "reason": f"'{operator}' is deactivated; a "
+                          f"deactivated operator may not accept "
+                          f"deviations"})
+            raise GateError(
+                f"deviation on task {task_id} not accepted: "
+                f"'{operator}' is deactivated (operator_inactive)")
         role = self.role_of(operator)
         if role is None or not role.can_administer:
             why = (f"'{operator}' holds no role" if role is None
@@ -1462,3 +1803,188 @@ class CopilotService:
             "reason": task.deviation_reason,
             "diffs": [d.model_dump(mode="json") for d in diffs]})
         return task
+
+    # -- orphaned work and pickup --------------------------------------
+    def orphaned_work(self) -> list[dict]:
+        """The unfinished work of deactivated operators: every
+        task whose operator stands deactivated while the task
+        still owes that operator an act (ORPHANED_STATUSES).
+        Nothing here is reassigned or deleted — the list is how
+        the work is seen, and picking an item up is the separate
+        recorded act below. A task whose confirmer was
+        deactivated is not orphaned: a confirmation is a past
+        act and stands; what strands work is its owner being
+        unable to act on it."""
+        orphaned: list[dict] = []
+        for task in self.list_tasks():
+            if task.status not in ORPHANED_STATUSES:
+                continue
+            entry = self.directory_entry(task.operator)
+            if entry is None or self.entry_active(entry):
+                continue
+            orphaned.append({
+                "task_id": task.task_id,
+                "status": task.status.value,
+                "operator": task.operator,
+                "planned_by": task.planned_by or task.operator,
+                "confirmed_by": task.confirmed_by,
+                "plan_version": task.plan_version,
+                "text": task.text,
+            })
+        return sorted(orphaned, key=lambda o: o["task_id"])
+
+    def pickup_task(self, task_id: str, operator: str) -> Task:
+        """Pick up a deactivated operator's orphaned task: a
+        recorded supervisor act that re-names the task's operator
+        to the supervisor. The original planner stays on the
+        record (`planned_by`, and `picked_up_from` names whose
+        work it was), and the audit entry carries both names.
+        Picking up is the only way orphaned work moves — it is
+        never auto-reassigned, and a task whose operator is
+        active has nothing to pick up."""
+        task = self._require_task(task_id)
+        entry = self.directory_entry(operator)
+        problem: Optional[tuple[str, str]] = None
+        if entry is None:
+            problem = ("unknown_operator",
+                       f"'{operator}' holds no role in the "
+                       f"operator directory")
+        elif not self.entry_active(entry):
+            problem = ("operator_inactive",
+                       f"'{operator}' is deactivated; a "
+                       f"deactivated operator may not pick up "
+                       f"work")
+        else:
+            role = self.get_role(entry["role"])
+            if role is None or not role.can_administer:
+                problem = ("role_cannot_administer",
+                           f"picking up orphaned work is a "
+                           f"supervisor act (a role with "
+                           f"can_administer)")
+        if problem is None:
+            owner = self.directory_entry(task.operator)
+            if (owner is None or self.entry_active(owner)
+                    or task.status not in ORPHANED_STATUSES):
+                problem = ("not_orphaned",
+                           f"task {task_id} is not orphaned "
+                           f"work: its operator is not a "
+                           f"deactivated name with work "
+                           f"outstanding (status "
+                           f"{task.status.value})")
+        if problem is not None:
+            code, reason = problem
+            self._audit(task_id, operator, "pickup_refused", {
+                "code": code, "reason": reason})
+            raise GateError(
+                f"pickup of task {task_id} refused: {reason}")
+        previous = task.operator
+        task.picked_up_from = previous
+        task.operator = entry["id"]
+        self._save(task)
+        self._audit(task_id, operator, "task_picked_up", {
+            "from_operator": previous,
+            "to_operator": entry["id"],
+            "planned_by": task.planned_by or previous,
+            "status": task.status.value})
+        return task
+
+    # -- attribution -----------------------------------------------------
+    def attribution_check(self) -> dict:
+        """Scan the whole audit trail — every task scope and the
+        roles scope — for an act that cannot be attributed: an
+        entry whose actor is missing, or whose actor resolves
+        neither to a directory name (in any state — a deactivated
+        name's history still attributes) nor to one of the shell's
+        named system components (SYSTEM_ACTORS). This is a check,
+        not a repair: it names the entries and changes nothing.
+        On a trail where every actor is known it reports zero
+        problems, and the count of entries it scanned."""
+        directory = {operator_named(e["id"])
+                     for e in self.list_operators()}
+        problems: list[dict] = []
+        entries = self.store.list_all_audit()
+        for entry in entries:
+            actor = entry.get("actor") or ""
+            base = {"scope": entry.get("task_id", ""),
+                    "event": entry.get("event", ""),
+                    "actor": actor}
+            if not str(actor).strip():
+                problems.append({**base, "problem": "actor_missing"})
+            elif (operator_named(actor) not in directory
+                    and operator_named(actor) not in SYSTEM_ACTORS):
+                problems.append(
+                    {**base, "problem": "actor_unresolvable"})
+        return {"checked": len(entries), "ok": not problems,
+                "problems": problems,
+                "system_actors": sorted(SYSTEM_ACTORS)}
+
+    def operator_report(self) -> list[dict]:
+        """What each operator did, folded from the audit trail —
+        never from counters, so the report cannot drift from the
+        trail it summarises. Per directory name (active or
+        deactivated): its acts by kind across every scope, the
+        tasks it planned (its `task_created` acts), confirmed, and
+        executed (the `execution_completed` entries naming it as
+        executor), and the refusals it received, by code.
+
+        Two attribution details are of their time: a plan refusal
+        is written under the "policy" actor, so it is counted for
+        the task's planner, whom the task record names; and
+        executions completed before the directory round carry no
+        executor on their entry, so those are counted for the
+        task's operator — the executor `execute` defaulted to
+        then."""
+        entries = self.store.list_all_audit()
+        tasks = {t.task_id: t for t in self.list_tasks()}
+        report: list[dict] = []
+        for raw in self.list_operators():
+            name = operator_named(raw["id"])
+            mine = [e for e in entries
+                    if operator_named(e.get("actor") or "") == name]
+            executed = 0
+            for e in entries:
+                if e.get("event") != "execution_completed":
+                    continue
+                executor = (e.get("detail") or {}).get("executor")
+                if executor:
+                    if operator_named(executor) == name:
+                        executed += 1
+                else:
+                    task = tasks.get(e.get("task_id", ""))
+                    if task is not None and operator_named(
+                            task.operator) == name:
+                        executed += 1
+            refusals: Counter = Counter()
+            for e in mine:
+                if str(e.get("event", "")).endswith("_refused"):
+                    refusals[(e.get("detail") or {}).get(
+                        "code", "")] += 1
+            for e in entries:
+                if e.get("event") != "plan_refused":
+                    continue
+                task = tasks.get(e.get("task_id", ""))
+                if task is None:
+                    continue
+                planner = task.planned_by or task.operator
+                if operator_named(planner) == name:
+                    refusals[(e.get("detail") or {}).get(
+                        "code", "")] += 1
+            report.append({
+                "operator": raw["id"],
+                "role": raw["role"],
+                "active": self.entry_active(raw),
+                "acts_total": len(mine),
+                "acts_by_kind": dict(sorted(
+                    Counter(e.get("event", "")
+                            for e in mine).items())),
+                "tasks_planned": sum(
+                    1 for e in mine
+                    if e.get("event") == "task_created"),
+                "tasks_confirmed": sum(
+                    1 for e in mine
+                    if e.get("event") == "plan_confirmed"),
+                "tasks_executed": executed,
+                "refusals_received": sum(refusals.values()),
+                "refusals_by_code": dict(sorted(refusals.items())),
+            })
+        return report
