@@ -1889,6 +1889,157 @@ def _():
            f"navigations {attempt.navigations}")
 
 
+# ------------------------------------------------------------- round 13
+# Accessibility mode: the spoken form of a plan, read-back
+# confirmation, transcript intake, and the operator preference.
+# The spoken form is a view (the stored plan is graded, not the
+# rendering's word for it); the read-back is the same gate with
+# a binding added; the transcript is a door into the same
+# intake; the preference is presentation only.
+
+CROSS_PAGE_TASK = (
+    "raise a credit memo for invoice 4471, reason damaged "
+    "goods, $120 and update the customer's email to "
+    "creditnotes@harbourview.example")
+TRANSCRIPT_TASK = (
+    "[00:03] Operator: raise a credit memo for invoice 4471,\n"
+    "Operator: reason damaged goods, $120")
+
+
+@case("accessibility: the spoken form spells a credit plan's amount")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    before = svc.get_plan(task.task_id).model_dump(mode="json")
+    view = svc.spoken_view(task.task_id)
+    expect("one hundred and twenty" in view["spoken"],
+           f"spoken {view['spoken']}")
+    expect("120.00" not in view["spoken"], "a figure was left bare")
+    # A view: asking stored nothing and changed nothing.
+    expect(svc.get_plan(task.task_id).model_dump(mode="json")
+           == before, "the spoken read moved the stored plan")
+    expect(svc.get_task(task.task_id).status == TaskStatus.PLANNED,
+           "the spoken read moved the task")
+
+
+@case("accessibility: the spoken form names both pages of a "
+      "multi-page plan")
+def _():
+    svc = fresh()
+    task = svc.intake(CROSS_PAGE_TASK, "op")
+    view = svc.spoken_view(task.task_id)
+    expect(view["pages"] == ["Invoices", "Customers"]
+           and view["multi_page"], f"view {view}")
+    expect("two pages: Invoices, then Customers" in view["spoken"],
+           f"spoken {view['spoken']}")
+
+
+@case("accessibility: a read-back token confirms end to end")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    issued = svc.issue_readback(task.task_id, "s.hale")
+    expect(issued["spoken_hash"]
+           == svc.spoken_view(task.task_id)["spoken_hash"],
+           "the token is not bound to the served spoken form")
+    svc.confirm_readback(task.task_id, "s.hale", issued["token"])
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED,
+           f"status {task.status}")
+    confirmed = [e for e in svc.audit(task.task_id)
+                 if e["event"] == "plan_confirmed"]
+    expect(confirmed and confirmed[0]["detail"].get("method")
+           == "readback", f"trail {confirmed}")
+    memo = svc.store.get_record("credit_memos", "CM-5001")
+    expect(memo is not None and memo["amount"] == "120.00",
+           f"memo {memo}")
+
+
+@case("accessibility: a token for v1 is refused after amendment "
+      "to v2, and the audit shows why")
+def _():
+    svc = fresh()
+    task = svc.intake(CREDIT, "op")
+    issued = svc.issue_readback(task.task_id, "s.hale")
+    svc.amend(task.task_id, "op",
+              [AmendChangeIn(seq=1, fields={"amount": "150.00"})])
+    try:
+        svc.confirm_readback(task.task_id, "s.hale",
+                             issued["token"])
+        expect(False, "a stale read-back token confirmed v2")
+    except GateError:
+        pass
+    refused = [e for e in svc.audit(task.task_id)
+               if e["event"] == "confirmation_refused"]
+    expect(refused
+           and refused[-1]["detail"]["code"] == "readback_stale",
+           f"refusals {refused}")
+    expect("v1" in refused[-1]["detail"]["reason"]
+           and "v2" in refused[-1]["detail"]["reason"],
+           f"reason {refused[-1]['detail']['reason']}")
+    expect(svc.get_task(task.task_id).status == TaskStatus.PLANNED,
+           "the stale token moved the task")
+    reissued = svc.issue_readback(task.task_id, "s.hale")
+    expect("one hundred and fifty" in reissued["spoken"],
+           "the new read-back does not speak the amended amount")
+    svc.confirm_readback(task.task_id, "s.hale", reissued["token"])
+    expect(svc.get_task(task.task_id).confirmed_version == 2,
+           "the fresh token did not bind v2")
+
+
+@case("accessibility: transcript intake plans identically to "
+      "typed text")
+def _():
+    svc = fresh()
+    typed = svc.intake(CREDIT, "op")
+    heard = svc.intake_transcript(TRANSCRIPT_TASK, "op")
+    expect(heard.text == CREDIT, f"task text {heard.text}")
+    typed_plan = svc.get_plan(typed.task_id)
+    heard_plan = svc.get_plan(heard.task_id)
+    expect(heard_plan.task_type == typed_plan.task_type
+           and heard_plan.summary == typed_plan.summary,
+           "the transcript's plan differs from the typed plan")
+    expect([s.model_dump(mode="json") for s in heard_plan.steps]
+           == [s.model_dump(mode="json") for s in typed_plan.steps],
+           "the transcript's steps differ from the typed steps")
+    trail = [e for e in svc.audit(heard.task_id)
+             if e["event"] == "transcript_intake"]
+    expect(trail and trail[0]["detail"]["raw"] == TRANSCRIPT_TASK,
+           "the raw transcript is not on the trail")
+
+
+@case("accessibility: the preference flag changes presentation "
+      "only — the same refusals apply")
+def _():
+    svc = fresh()
+    svc.set_operator_preference("s.hale", "op", True)
+    entry = svc.directory_entry("op")
+    expect(svc.entry_prefers_spoken(entry), "the flag did not land")
+    # The preference holder still cannot confirm their own plan,
+    # on either confirmation path.
+    task = svc.intake(CREDIT, "op")
+    for attempt in (
+            lambda: svc.confirm(task.task_id, "op"),
+            lambda: svc.confirm_readback(
+                task.task_id, "op",
+                svc.issue_readback(task.task_id, "op")["token"])):
+        try:
+            attempt()
+            expect(False, "a preference widened the gate")
+        except GateError:
+            pass
+    codes = [e["detail"]["code"] for e in svc.audit(task.task_id)
+             if e["event"] == "confirmation_refused"]
+    expect(codes == ["self_confirmation", "self_confirmation"],
+           f"codes {codes}")
+    # And the flow itself is untouched: a supervisor's read-back
+    # still confirms, and execution still verifies.
+    issued = svc.issue_readback(task.task_id, "s.hale")
+    svc.confirm_readback(task.task_id, "s.hale", issued["token"])
+    expect(svc.execute(task.task_id, "offline").status
+           == TaskStatus.VERIFIED, "the voiced flow did not verify")
+
+
 def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     for name, ok, detail in RESULTS:

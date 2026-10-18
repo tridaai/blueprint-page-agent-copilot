@@ -499,7 +499,13 @@ def test_no_batch_route_performs_a_decision(client):
     the batch's trail that records itself in the batches scope
     and decides nothing about any member. It is the only batch
     write beside creation, it names no decision segment, and
-    the probe below proves it leaves every member untouched."""
+    the probe below proves it leaves every member untouched.
+    One more named exception, since round 13:
+    `POST /api/tasks/transcript` sits under /api/tasks/ with no
+    task id because it is an intake door, not an act on a task —
+    it states a new task from a transcript, exactly as
+    `POST /api/tasks` states one from typed text, and decides
+    nothing about any task that exists."""
     app = client.app
     batch_routes = []
     for route in app.routes:
@@ -516,10 +522,13 @@ def test_no_batch_route_performs_a_decision(client):
                 f"batch route {path} allows {methods}")
             assert not (set(path.split("/")) & DECISION_SEGMENTS), (
                 f"batch route {path} names a decision")
-        # Every act on an existing task names that task.
+        # Every act on an existing task names that task. The
+        # transcript door is the one exception: an intake, not
+        # an act — it creates a task and decides nothing.
         if path.startswith("/api/tasks/") and "POST" in methods:
-            assert "{task_id}" in path, (
-                f"task decision route without a task id: {path}")
+            assert "{task_id}" in path \
+                or path == "/api/tasks/transcript", (
+                    f"task decision route without a task id: {path}")
     # The batch writes are creation — and the audit export,
     # which decides nothing (proven by the probe below).
     posts = [(p, m) for p, m in batch_routes if "POST" in m]
