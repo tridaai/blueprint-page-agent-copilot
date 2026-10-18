@@ -33,6 +33,7 @@ from .models import (
     TaskIntake,
 )
 from .policy import PlanRefusal
+from .reads import ConsoleReads
 from .records import apply_field_change, create_credit_memo
 from .roles import RoleError
 from .service import CopilotService, GateError
@@ -48,6 +49,7 @@ def create_app(settings: Optional[Settings] = None,
     setup_logging()
     settings = settings or Settings.from_env()
     store = store or build_store(settings)
+    reads = ConsoleReads(store)
     service = CopilotService(settings, store)
     if seed:
         service.seed()
@@ -118,6 +120,10 @@ def create_app(settings: Optional[Settings] = None,
         return {"seeded": seeded}
 
     # -- OrderDesk console data ----------------------------------------
+    # Reads are served through the console read surface (reads.py)
+    # — the same functions the verifier re-reads through, so what a
+    # human sees and what verification diffs are the same shape.
+    # Saves stay on the mutation path in records.py.
     def _save(kind: str, record_id: str, body: ConsoleSaveIn):
         for field in body.fields:
             if field in PAYMENT_FIELDS:
@@ -134,11 +140,11 @@ def create_app(settings: Optional[Settings] = None,
 
     @app.get("/api/console/customers")
     def customers():
-        return store.list_records("customers")
+        return reads.list("customers")
 
     @app.get("/api/console/customers/{record_id}")
     def customer(record_id: str):
-        record = store.get_record("customers", record_id)
+        record = reads.get("customers", record_id)
         if record is None:
             raise KeyError(f"customers record {record_id} does not exist")
         return record
@@ -149,11 +155,11 @@ def create_app(settings: Optional[Settings] = None,
 
     @app.get("/api/console/invoices")
     def invoices():
-        return store.list_records("invoices")
+        return reads.list("invoices")
 
     @app.get("/api/console/invoices/{record_id}")
     def invoice(record_id: str):
-        record = store.get_record("invoices", record_id)
+        record = reads.get("invoices", record_id)
         if record is None:
             raise KeyError(f"invoices record {record_id} does not exist")
         return record
@@ -164,11 +170,11 @@ def create_app(settings: Optional[Settings] = None,
 
     @app.get("/api/console/orders")
     def orders():
-        return store.list_records("orders")
+        return reads.list("orders")
 
     @app.get("/api/console/orders/{record_id}")
     def order(record_id: str):
-        record = store.get_record("orders", record_id)
+        record = reads.get("orders", record_id)
         if record is None:
             raise KeyError(f"orders record {record_id} does not exist")
         return record
@@ -179,7 +185,7 @@ def create_app(settings: Optional[Settings] = None,
 
     @app.get("/api/console/credit-memos")
     def credit_memos():
-        return store.list_records("credit_memos")
+        return reads.list("credit_memos")
 
     @app.post("/api/console/credit-memos")
     def issue_credit_memo(body: ConsoleSaveIn):
