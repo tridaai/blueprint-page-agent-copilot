@@ -587,6 +587,78 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   presentation only — it grants no action class, widens no
   allowlist, and skips no check; the eval gate proves the
   same refusals land with it set.
+- **Clarification** (round 14) — the one outcome between a plan
+  and a refusal. Derivation raises `PlanAmbiguous` — beside
+  `PlanRefusal` in `policy.py`, carrying a code, an ambiguity
+  key, a question composed in code, and 2–4 options — only
+  where the text matches a governed shape in more than one way
+  and the records offer the choice; the classes are defined in
+  `planner.py` and are the only ones. A **record described by a
+  governed status word** — "the open invoice" in a credit task,
+  or "mark the packed order as shipped" as a status clause (a
+  descriptor clause stands alone; mixing it with a numbered
+  clause refuses whole; in a credit task the credit's own
+  reference is whichever the text states first, so a settle
+  tail's numbered invoice is never taken for the credit's) —
+  resolves against the records with that status: zero matches
+  is `record_not_found`, exactly one derives directly (the
+  choice is derivable, so nothing is asked), two to four ask,
+  more refuse (a choice that wide is stated by number). A
+  **missing credit amount** asks only when the records offer a
+  governed candidate set for that invoice — its own amount,
+  plus the amount of each credit memo already issued against
+  it, each option labelled with its provenance; the records
+  carry no instalment schedule, so no instalment amounts are
+  offered, and a singleton or oversized set leaves the
+  `no_plan_derivable` refusal standing. A **status value
+  prefixing two or more governed values** ("p": placed or
+  packed) asks between them, in status clauses, descriptor
+  clauses, and the credit settle tail alike; a prefix matching
+  one governed value, or none, still refuses as
+  `value_not_governed` — a unique continuation is not a choice,
+  and clarification is not a spelling corrector. The service
+  parks the task in AWAITING_CLARIFICATION with the question
+  stored on it (`Task.clarifications`: key, code, question,
+  options, and — once answered — answer and answerer; answered
+  entries are never rewritten, so a re-asked question appends
+  and the task carries its whole history). Answering
+  (`POST /api/tasks/{id}/clarify`) is a recorded act under the
+  planning role rules — enrolled, active, plan-capable, the
+  refusal codes recorded as `clarification_refused` before the
+  409 raises — with one deliberate difference from
+  confirmation: the planner may answer their own clarification,
+  because it is still their task and no gate is being passed.
+  The choice must equal an option's value exactly; anything
+  else is refused with the options restated in the error, and
+  the task stays parked — free text is never interpreted into
+  a value. A taken answer re-runs derivation with the choices
+  pinned by key (`Task.clarification_resolutions`, derived from
+  the entries, later entry winning); a pin is consulted only at
+  its own ambiguity point, and only while it still stands
+  among the freshly computed options — if the records moved
+  (the picked invoice was paid meanwhile), the question is
+  asked again with fresh options rather than the stale pin
+  being honoured or silently replaced, and a pinned amount is
+  re-checked against the credit cap like any stated amount.
+  Patience is governed in Policy (`max_clarifications`,
+  `COPILOT_MAX_CLARIFICATIONS`, default 2 distinct questions):
+  a third distinct ambiguity refuses the task as
+  `clarification_exhausted`, the `plan_refused` entry carrying
+  the questions and answers — while a re-ask of an
+  already-asked question spends no new patience. The exits
+  stay consistent with the rest of the shell: a STALE clarified
+  task re-plans with its answers pinned, and if the records
+  then raise a question those answers no longer settle, the
+  re-plan refuses (`clarification_needed`) rather than asking —
+  a re-plan is not an interactive door. A batch member parked
+  here shows the `clarify` next act on the run sheet and keeps
+  the batch incomplete; template health treats a rendered
+  example that would ask as not deriving outright; and the
+  eval gate's ambiguity pack proves the invariant value by
+  value — every value in every clarified plan traces to the
+  task text, a named record field, or the recorded answer,
+  with the CREATE step's fixed `issued` literal the one stated
+  exception.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -679,6 +751,15 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   entry carrying the read-back codes (`readback_unknown`,
   `readback_operator_mismatch`, `readback_used`,
   `readback_stale`) beside the unchanged identity codes.
+  Clarification adds, on the task's trail:
+  `clarification_asked` (the ambiguity key and class, the
+  question, the options offered), `clarification_answered`
+  (the key, the answer, by the answering operator), and
+  `clarification_refused` (the act's code — `unknown_operator`,
+  `operator_inactive`, `role_cannot_plan`, or `not_an_option`
+  for a reply that is none of the offered values); an exhausted
+  task's refusal is the ordinary `plan_refused` entry carrying
+  code `clarification_exhausted` and the clarification history.
 
 ## The PageAgent API, as verified
 

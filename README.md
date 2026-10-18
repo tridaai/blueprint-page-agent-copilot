@@ -49,11 +49,12 @@ evidence.
 - **Governed task shell** — intake → plan → confirm gate → execute →
   verify → audit, with the state machine enforced in code against
   the store (DRAFT → PLANNED → CONFIRMED → VERIFIED / DISCREPANCY /
-  REFUSED, plus STALE and REJECTED below, DISCREPANCY_ACCEPTED
-  where a supervisor accepts a named deviation, and
-  EXECUTION_FAILED → ABANDONED where a run stops mid-plan and is
-  closed, or picked up again — see Failure recovery). Executing an
-  unconfirmed plan is refused (HTTP 409).
+  REFUSED, plus STALE and REJECTED below, AWAITING_CLARIFICATION
+  where derivation asks a question before any plan exists,
+  DISCREPANCY_ACCEPTED where a supervisor accepts a named
+  deviation, and EXECUTION_FAILED → ABANDONED where a run stops
+  mid-plan and is closed, or picked up again — see Failure
+  recovery). Executing an unconfirmed plan is refused (HTTP 409).
 - **Multi-record plans** — one task can compose one plan across
   records: a credit memo with the invoice settled in the same plan,
   an order shipped with its date and carrier, status changes naming
@@ -112,6 +113,42 @@ evidence.
   read-back route is the offered confirmation path. The
   flag is presentation only — it permits nothing, and the
   eval gate proves the same refusals land with it set.
+- **Clarification, never invention** — a task whose words match a
+  governed shape in more than one way no longer dies as a
+  refusal: it parks in **AWAITING_CLARIFICATION** carrying 2–4
+  concrete options computed from the records, under a question
+  composed in code from those options. The ambiguity classes are
+  defined in code, and they are the only ones: a record
+  **described by a governed status word** ("the open invoice";
+  "mark the packed order as shipped") that matches several
+  records — one match derives directly, none refuses as
+  `record_not_found`; a credit task that **omits its amount**
+  where the records offer a governed candidate set (the
+  invoice's own amount, and the amounts of credit memos already
+  issued against it — the records here carry no instalment
+  schedule, so no instalment amounts are offered); a status
+  value that **prefixes two governed values** ("p" for an order:
+  placed or packed — a prefix matching only one governed value
+  still refuses as `value_not_governed`). Answering is a
+  recorded act (`POST /api/tasks/{id}/clarify`) under the
+  planning role rules — the answerer must be enrolled, active,
+  and plan-capable; the planner may answer their own
+  clarification, and confirmation remains a second person as
+  always. The answer re-runs derivation with the choice pinned,
+  and the pin is re-validated against the records as they now
+  stand: if the basis moved, the question is asked again with
+  fresh options rather than the stale pin being honoured. A
+  reply that is not one of the options is refused with the
+  options restated — the shell never interprets free text into
+  a value. Patience is governed (`COPILOT_MAX_CLARIFICATIONS`,
+  default 2 distinct questions): after the second answer, a
+  third ambiguity refuses the task as `clarification_exhausted`
+  with the questions and answers attached. The eval gate's
+  ambiguity pack proves the invariant value by value: every
+  value in every clarified plan traces to the task text, a
+  named record field, or the recorded answer — and a task with
+  no governed option set still refuses, because clarification
+  is not a backdoor around `no_plan_derivable`.
 - **Plan amendments and diffs** — while a plan awaits confirmation,
   an operator may amend its values; every amended value passes the
   same policy checks as planning, the amendment becomes plan
@@ -340,7 +377,11 @@ caps the plan a task may derive, `COPILOT_MAX_EXECUTION_STEPS`
 clock — each enforced in the shell, the attempt stopped and the
 exhaustion named rather than overrun. The `maxSteps` the console
 serves the in-page agent is the execution-step ceiling itself,
-read from the same Policy — one number, one home.
+read from the same Policy — one number, one home. Clarification:
+`COPILOT_MAX_CLARIFICATIONS` (default 2) caps the distinct
+questions derivation may ask one task before a further ambiguity
+refuses it — the same Policy home, the same enforcement in the
+shell.
 
 ## The governed task grammar
 
@@ -353,17 +394,31 @@ so a task it cannot derive exactly is refused as
 | Credit memo | `raise a credit memo for invoice 4471, reason damaged goods, $120` |
 | Credit memo + settle | `… $120 and mark invoice 4471 as paid` |
 | Credit memo + customer update | `… $120 and update the customer's email to creditnotes@harbourview.example` (cross-page: Invoices → Customers) |
+| Credit memo, invoice described | `raise a credit memo for the open invoice, reason damaged goods, $120` (clarifies when several invoices are open) |
 | Order status | `mark order 1032 as shipped` |
+| Order status, record described | `mark the packed order as shipped` (clarifies when several orders are packed) |
 | Ship with details | `mark order 1032 as shipped, ship date 2026-10-20, carrier DHL` |
 | Compound status | `mark order 1036 as packed and mark invoice 4474 as paid` |
 | Invoice status | `mark invoice 4474 as paid` |
 | Customer update | `update customer 2041 phone to 555-0134` |
 
+A record may be described by a governed status word instead of
+named by its number — in a credit task, or as the record of a
+status clause (a descriptor clause stands alone in its task;
+mixing it with a clause that names a record by number refuses
+whole). One match derives; several matching records ask, as
+above; a status value stated as a prefix of two governed values
+asks the same way. A credit task may omit its amount only when
+the records offer a candidate set for that invoice to clarify
+between; otherwise the amount must be stated, exactly as before.
+
 Plan-time refusals, each with its reason recorded on the task:
 `credit_above_cap`, `payment_field`, `delete_refused`,
 `field_not_plannable`, `value_not_governed`, `record_not_found`,
 `no_plan_derivable`, `plan_too_large` (a derived plan over the
-governed step ceiling, both counts named) — and the role
+governed step ceiling, both counts named),
+`clarification_exhausted` (a third distinct ambiguity after two
+answered questions, the history attached) — and the role
 refusals: `unknown_operator`, `role_cannot_plan`,
 `field_not_permitted`, `page_not_permitted`.
 Amendments face the same checks, plus `step_not_found` and
@@ -541,7 +596,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (77 cases)
+evals/            the scripted-task gate (85 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -549,9 +604,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 290 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 316 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 77/77 cases: happy paths diffed exactly (including
+make evals   # 85/85 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -652,7 +707,17 @@ make evals   # 77/77 cases: happy paths diffed exactly (including
              # transcript planning identically to the same words
              # typed, and the spoken-form preference changing
              # presentation only — the same refusals landing
-             # with it set
+             # with it set — and ambiguity: a multi-match
+             # invoice clarified and verified with exact diffs,
+             # a missing amount clarified from the records'
+             # candidates, a prefix status clarified between
+             # governed values, a unique descriptor deriving
+             # without asking, the two negative controls (no
+             # candidate set — the refusal stands; a non-answer
+             # refused with the options restated), a third
+             # question exhausting the governed patience, and
+             # every clarified plan's values traced to the text,
+             # a record field, or the recorded answer
 ```
 
 ## Honest status
