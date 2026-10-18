@@ -178,6 +178,30 @@ evidence.
   protocol refusal never ends an execution, so it is not an
   ending class). The fold is stored as a dated snapshot;
   regenerating a day replaces it at a bumped version.
+- **MCP surface — tasks, never clicks** — machine clients (an
+  MCP host: an IDE, a desktop assistant, another agent) get a
+  surface with the opposite contract to PageAgent's own MCP
+  server, which hands an external client the in-page agent's
+  controls directly. This one offers seven task-level tools —
+  `submit_task`, `submit_template_task`, `answer_clarification`
+  (an offered option's value, never free text), and the reads
+  `get_task`, `list_templates`, `get_verification`,
+  `get_task_audit` — and nothing else: no tool confirms,
+  executes, amends, deletes, or touches a record, and a call to
+  a click-shaped name is refused by name. Confirmation and
+  execution stay human acts in the console. Every call carries
+  an operator name and is judged by the same directory and role
+  rules as any other door — a viewer submitting over MCP gets
+  the viewer's `role_cannot_plan` refusal in the same words —
+  and each act the surface causes lands on the task's trail
+  with `channel: "mcp"` on its door entry, so the audit shows
+  where work arrived from. The protocol is the repo's own code
+  (stdio, JSON-RPC, `initialize` / `ping` / `tools/list` /
+  `tools/call`): the official `mcp` Python SDK was surveyed
+  first and resolves against the repo's frozen pydantic pin
+  but fails at import — it needs pydantic < 2.14 in practice —
+  and moving a frozen pin for seven tools was refused. Run it
+  with `page-agent-copilot mcp`.
 - **Deployment profiles** — how the agent ships and where its
   model lives is a named, governed choice (`COPILOT_PROFILE`),
   not an accident of how the page was pasted together. A
@@ -663,6 +687,9 @@ src/page_agent_copilot/
   observability.py the trace, the failure taxonomy, and the
                   daily digest fold — pure derivations over the
                   task, attempt, report, and audit records
+  mcp_server.py   the MCP surface: machine clients submit tasks
+                  over stdio JSON-RPC — tasks, never clicks; the
+                  protocol is the repo's own code (see the module)
   store.py        the store port: in-memory / SQLite / PostgreSQL
   records.py      the one mutation path for OrderDesk state
   dataset.py      the OrderDesk seed data (generated in code; gold
@@ -675,7 +702,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (92 cases)
+evals/            the scripted-task gate (96 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -683,9 +710,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 360 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 381 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 92/92 cases: happy paths diffed exactly (including
+make evals   # 96/96 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -810,7 +837,17 @@ make evals   # 92/92 cases: happy paths diffed exactly (including
              # a self-hosted keyless deployment validating with
              # the attempt recording the deployment it ran
              # under, and a hosted endpoint without a key
-             # refusing at config load, by name
+             # refusing at config load, by name — and the MCP
+             # surface: a task submitted over the wire (the real
+             # server, a subprocess on stdio) planned, and
+             # verified only after a human confirmed and
+             # executed it off-surface, with the channel on the
+             # trail; a clarification asked and answered over
+             # the wire by option value, free text refused; a
+             # click-shaped call refused by name; a viewer and a
+             # deactivated operator refused in the shell's own
+             # words; and the library listed and instantiated
+             # over the wire, a bad slot refusing with its code
 ```
 
 ## Honest status
@@ -830,6 +867,12 @@ make evals   # 92/92 cases: happy paths diffed exactly (including
   resume re-arms the task for the remaining steps only. The
   offline driver is the default everywhere until a live run is
   on record.
+- The **MCP surface inherits the shell's identity model**: an
+  operator name, judged by the directory — there is no credential
+  layer on any door of this blueprint, console, API, or MCP. The
+  stdio server runs as a local process under the deployment's
+  own account; a deployment that exposes it further fronts it
+  with its own transport security, the way it would the API.
 - The **PostgreSQL store leg skips** until the local stack is up
   (env-gated, same as the sibling blueprints); the migration follows
   the established dual-dialect pattern and the SQLite dialect is

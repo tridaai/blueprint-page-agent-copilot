@@ -757,6 +757,59 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   deployment ran a task even after the deployment changes;
   attempts from before profiles carry empty fields, their
   deployment unknown rather than backfilled.
+- **MCP surface** (`mcp_server.py`, doors in `service.py`) — the
+  shell exposed to machine clients (an MCP host: an IDE, a
+  desktop assistant, another agent) under the opposite contract
+  to PageAgent's own MCP server, which hands an external client
+  the in-page agent's controls directly. The founding rule:
+  clients request TASKS, never raw clicks. The seven tools are
+  `submit_task`, `submit_template_task`, and
+  `answer_clarification` (an offered option's value, never free
+  text) on the write side, and `get_task`, `list_templates`,
+  `get_verification`, `get_task_audit` as reads. No tool
+  confirms, executes, amends, deletes, or touches a record —
+  there is no handler behind which such an act could hide, and
+  a call to a click-shaped or execution-shaped name is refused
+  by name, with the tool list restated. Submissions enter
+  through three doors on the service (`submit_task_mcp`,
+  `instantiate_template_mcp`, `answer_clarification_mcp`), each
+  the ordinary act — intake, instantiation, clarification —
+  plus one trail entry (`mcp_task_submitted`,
+  `mcp_template_submitted`, `mcp_clarification_answered`)
+  carrying `channel: "mcp"` and the tool's name, the pattern
+  `intake_transcript` set in round 13. The directory therefore
+  judges an MCP submission exactly as it judges a typed one
+  (a viewer is refused `role_cannot_plan`, a deactivated
+  operator `operator_inactive`, in the same words), and the
+  trail shows where every act came from. A plan-time refusal
+  is a result, not a protocol error: the REFUSED task with its
+  refusal_reason, so a client can tell "the submission worked,
+  the plan was refused" from "the call failed". Gate refusals
+  on acts (a clarification answer from a name that may not
+  give one) and unknown-task reads return as `isError` results
+  whose text is the shell's refusal verbatim — for template
+  errors, the standing `code: message` form. The protocol is
+  the repo's own code: the survey tried the official `mcp`
+  Python SDK (1.10–1.18) and it resolves against the frozen
+  pydantic 2.14.0 pin but fails at import — FastMCP reaches
+  for a private pydantic helper pydantic 2.14 removed — so
+  the SDK in fact requires pydantic < 2.14, and moving a
+  frozen pin for seven tools was refused. Implemented and
+  claimed, no more: stdio transport, one JSON-RPC 2.0 message
+  per line; `initialize` (protocol versions `2024-11-05` and
+  `2025-03-26`, capabilities `{tools: {}}` and instructions
+  stating the founding rule), `ping`, `tools/list`,
+  `tools/call`; notifications answered with silence; an
+  unknown method refused by name at -32601, a malformed call
+  at -32602 naming the missing argument, a non-JSON line at
+  -32700 without killing the loop. The surface is stateless
+  per call beyond the store; two clients share nothing but
+  the records, like two console tabs. The suite drives it
+  in-process and over a real stdio subprocess; the eval gate
+  drives the subprocess and proves the human split over the
+  wire — a task submitted by a client is planned, and only
+  verifies after a human confirmed and executed it off the
+  surface, through the service, on the same store.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -858,6 +911,11 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   for a reply that is none of the offered values); an exhausted
   task's refusal is the ordinary `plan_refused` entry carrying
   code `clarification_exhausted` and the clarification history.
+  The MCP surface adds its door entries, on the task's trail:
+  `mcp_task_submitted`, `mcp_template_submitted`, and
+  `mcp_clarification_answered` — each carrying `channel: "mcp"`
+  and the tool's name, written after the act they name, the way
+  `transcript_intake` rides an intake.
 
 ## The PageAgent API, as verified
 
@@ -1010,6 +1068,19 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   the run sheet shows the desk exactly which member needs which
   act from whom, and each act is then taken on that task,
   recorded as that person's.
+- **A machine client is an operator, not a principal.** The MCP
+  surface lends a client no authority of its own: every call
+  carries an operator name, and the directory judges that name
+  by the same enrolment, active state, and role rules as any
+  other door — a client submitting as a viewer gets the viewer's
+  refusal, in the viewer's words. And the surface's shape is
+  itself a boundary: it offers tasks and reads, so there is no
+  message a client can send that confirms a plan, executes one,
+  or writes a record; the strongest thing on the wire is a
+  well-formed task, and the weakest reading of it still ends at
+  the planner. What upstream PageAgent's MCP server exposes —
+  the in-page agent's controls, driven from outside — is
+  exactly what this surface refuses to be.
 
 ## Production profile
 
