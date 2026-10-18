@@ -88,6 +88,9 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
     other than the planner. Self-confirmation is refused for
     every role, with names compared normalised so a casing or
     spacing variant of the planner's name is still the planner.
+    A plan under dual control (see the Dual control component)
+    needs two such holders, distinctly — the same name twice is
+    refused as `already_confirmed`.
   - **Amendment** — an amend-capable role, and every amended field
     inside the *amender's* allowlist: an amendment cannot widen a
     plan into a field the amender's own role holds back.
@@ -810,6 +813,38 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   wire — a task submitted by a client is planned, and only
   verifies after a human confirmed and executed it off the
   surface, through the service, on the same store.
+- **Dual control** (`policy.dual_control_assessment`, seats in
+  `service.py`; round 18) — the confirmation gate scales with the
+  plan's stakes. The assessment is computed from the plan's steps,
+  never stored: a plan is under dual control when the total it
+  credits (every credit memo it creates, summed) reaches
+  `Policy.dual_control_cap` (`COPILOT_DUAL_CONTROL_CAP`, defaulting
+  to the credit cap in force), or when a step sets a high-stakes
+  field — `DUAL_CONTROL_FIELDS`, exactly `customers.credit_limit`
+  today: the one plannable field that extends money rather than
+  recording work, and already the field the role model holds back
+  from operators. A plan under dual control is confirmed by two
+  seats: confirmations are records on the task
+  (`PlanConfirmation` — operator, method, plan version, time), and
+  the gate completes only when two distinct confirm-capable
+  operators, neither of them the planner, have confirmed the same
+  version. The first seat leaves the task PLANNED; execution from
+  there refuses in the service, naming the second confirmer owed —
+  the refusal is a gate fact, not a status, so the state machine
+  gains no new state. The same name twice refuses as
+  `already_confirmed` (names normalised, as everywhere); the
+  planner can never hold a seat. A read-back confirmation fills a
+  seat exactly like the plain act, its token binding intact per
+  seat. An amendment or a re-plan clears the seats — they bound
+  the superseded version's words — and the reset count rides the
+  `plan_amended` entry. The standing is derived on every surface
+  that shows it: plan reads carry `dual_control_required` and the
+  reasons, task reads carry the `dual_control` view (seats
+  required and filled, the confirmers, whether a second is owed),
+  the console badges it, the batch run sheet's next act for a
+  one-seat task is the second confirmation with both exclusions
+  named, and the daily digest folds the day's dual-control tasks
+  and those still awaiting their second confirmer.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -1030,6 +1065,14 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
   "latest". Amending after confirmation is not a state the machine
   has; the only paths past a confirmed plan are execution and
   rejection.
+- **The gate scales with the stakes.** A plan at the credit cap,
+  or one that raises a customer's credit limit, is confirmed by
+  two different people, not one — and "different" is enforced, not
+  assumed: the planner holds no seat, a confirmer holds one seat
+  per version, and names are compared normalised. One seat filled
+  is a fact on the record and in the trail, never a completed
+  gate; execution checks the seats on the bound version before
+  anything runs.
 - **A plan executes on the records it was derived from, or not at
   all.** Precondition hashes are rechecked at execution for both
   drivers. A record that changed under a plan — however innocently,

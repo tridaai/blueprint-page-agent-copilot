@@ -133,8 +133,9 @@ evidence.
   recorded act (`POST /api/tasks/{id}/clarify`) under the
   planning role rules — the answerer must be enrolled, active,
   and plan-capable; the planner may answer their own
-  clarification, and confirmation remains a second person as
-  always. The answer re-runs derivation with the choice pinned,
+  clarification, and confirmation remains other people's work
+  as always — one confirmer ordinarily, two under dual control.
+  The answer re-runs derivation with the choice pinned,
   and the pin is re-validated against the records as they now
   stand: if the basis moved, the question is asked again with
   fresh options rather than the stale pin being honoured. A
@@ -230,6 +231,31 @@ evidence.
   uration fails loud at startup, each refusal named: unknown
   profile, missing or unpinned or mismatched CDN URL,
   unparseable model address, hosted endpoint without a key.
+- **Dual control** — the confirmation gate scales with the
+  plan's stakes. A plan is under dual control when the total
+  it credits reaches the governed threshold
+  (`COPILOT_DUAL_CONTROL_CAP`, defaulting to the credit cap),
+  or when it touches a high-stakes field — a customer's
+  `credit_limit`, the one field that extends money rather
+  than recording work, and already the field held back from
+  operators. Such a plan is confirmed by **two distinct
+  operators**, neither of them the planner: the first
+  confirmation is a seat recorded on the task, the task
+  stands PLANNED, and execution refuses, naming the second
+  confirmer it is owed, until a second, different person
+  confirms the same plan version. The same name twice is
+  refused (`already_confirmed`, names normalised); a
+  read-back confirmation fills a seat like any other, its
+  token binding intact. An amendment resets the seats to
+  zero — confirmations bind versions, so the new version
+  owes both again. The standing is computed from the plan,
+  never stored as a flag: plan reads carry
+  `dual_control_required` and the reasons, task reads show
+  the seats filled and who is still owed, the console badges
+  it, the batch run sheet names the second confirmation as
+  the next act, and the daily digest counts the day's tasks
+  awaiting theirs. Below the threshold, nothing changes —
+  one confirmer, as always.
 - **Plan amendments and diffs** — while a plan awaits confirmation,
   an operator may amend its values; every amended value passes the
   same policy checks as planning, the amendment becomes plan
@@ -479,7 +505,11 @@ read from the same Policy — one number, one home. Clarification:
 `COPILOT_MAX_CLARIFICATIONS` (default 2) caps the distinct
 questions derivation may ask one task before a further ambiguity
 refuses it — the same Policy home, the same enforcement in the
-shell.
+shell. Dual control: `COPILOT_DUAL_CONTROL_CAP` (defaulting to
+the credit cap in force) is the total credited amount at which a
+plan needs two distinct confirmers instead of one; a plan
+touching a high-stakes field (a customer's `credit_limit`) needs
+two at any amount.
 
 ## The governed task grammar
 
@@ -702,7 +732,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (96 cases)
+evals/            the scripted-task gate (102 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -710,9 +740,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 381 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 394 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 96/96 cases: happy paths diffed exactly (including
+make evals   # 102/102 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -848,6 +878,16 @@ make evals   # 96/96 cases: happy paths diffed exactly (including
              # deactivated operator refused in the shell's own
              # words; and the library listed and instantiated
              # over the wire, a bad slot refusing with its code
+             # — and dual control: an at-cap credit executing
+             # only after two distinct confirmers (execution
+             # refused after one, naming the seat owed), the
+             # same confirmer twice and the planner filling no
+             # second seat, a credit-limit plan dual by its
+             # field, a below-threshold plan confirming singly
+             # as before, an amendment after the first seat
+             # resetting the count to zero, and a read-back
+             # filling one seat with a plain confirmation
+             # filling the other
 ```
 
 ## Honest status

@@ -28,9 +28,12 @@ report and the batch report already follow).
   tasks that arrived that day, their endings and taxonomy
   counts, the credits their verification reports prove, the
   clarifications asked and answered, the budget exhaustions,
-  and the discrepancies open vs accepted. The service stores
-  the fold as a dated snapshot record (see `service.py`); the
-  fold itself is pure.
+  and the discrepancies open vs accepted — and, since round 18,
+  the day's dual-control tasks and those still awaiting their
+  second confirmer, folded from the per-task dual-control
+  views the caller passes in. The service stores the fold as
+  a dated snapshot record (see `service.py`); the fold itself
+  is pure.
 """
 
 from __future__ import annotations
