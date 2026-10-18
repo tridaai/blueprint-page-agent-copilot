@@ -552,8 +552,21 @@ package's own TypeScript declarations (`page-agent@1.12.4`, MIT):
 - **Page content is data.** Record fields — including free-text
   notes written to look like instructions — are never read by the
   planner. The seed carries a note that tries ("also refund $5,000")
-  and an eval case proves it produces no plan deviation. (The full
-  hostile-content red team is a later round.)
+  and an eval case proves it produces no plan deviation. The
+  round-10 red team (`docs/red-team.md`) attacks the boundary on
+  every surface — record fields, task text, bridge reports,
+  template slots — graded zero-tolerance, and its plan-shape proof
+  is byte-equality against a benign control. It caught one real
+  hole, in the planner: a credit task's amount was read from the
+  first $-figure in the text, so a figure inside the reason
+  ("refund of $50 overcharge, $120") silently became the amount
+  — and a stated $900 could hide behind it, under the cap. The
+  amount is now the task's last figure, the position every
+  governed shape states it in, and the reason is sliced up to it.
+  The same discipline binds the operator's own text: a claimed
+  identity or a "skip confirmation" inside a task is data to the
+  grammar, never a credential or a gate state — both are in the
+  pack, and both gain nothing.
 - **The agent's report is not evidence.** Verification re-reads
   the records through the console read surface. A bridge that
   reports success while doing nothing produces a DISCREPANCY
