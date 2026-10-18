@@ -2773,12 +2773,24 @@ class CopilotService:
         scope = {"kind": "batch", "id": batch_id}
         self._export_gate(BATCH_AUDIT_SCOPE, exporter, scope)
         member_ids = {m.task_id for m in batch.members if m.task_id}
+
+        def names_this_batch(entry: dict) -> bool:
+            detail = entry.get("detail") or {}
+            if detail.get("batch_id") == batch_id:
+                return True
+            # The export acts name their scope the document's
+            # way, not the creation entry's way — a later batch
+            # export chains an earlier one's act in, exactly as
+            # a task export chains its predecessor.
+            scope = detail.get("scope") or {}
+            return (scope.get("kind") == "batch"
+                    and scope.get("id") == batch_id)
+
         entries = [
             e for e in self.store.list_all_audit()
             if e["task_id"] in member_ids
             or (e["task_id"] == BATCH_AUDIT_SCOPE
-                and (e.get("detail") or {}).get("batch_id")
-                == batch_id)]
+                and names_this_batch(e))]
         return self._finish_export(
             BATCH_AUDIT_SCOPE, scope, exporter, entries, rendering)
 
