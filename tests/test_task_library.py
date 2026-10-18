@@ -286,9 +286,14 @@ def test_an_old_version_instantiates_by_name_and_version(service):
     old = service.instantiate_template("order-status", 1, slots,
                                        "j.okafor")
     assert old.template_version == 1
+    # Round 19 changed this by design: a bare publish no longer
+    # moves the default, so a name-only instantiation still
+    # resolves to the seeded v1 — v2 serves name-only callers
+    # only once it is evaluated and promoted (the gate is
+    # covered in test_template_gate.py).
     new = service.instantiate_template("order-status", None, slots,
                                        "j.okafor")
-    assert new.template_version == 2
+    assert new.template_version == 1
     entry = [e for e in service.audit(old.task_id)
              if e["event"] == "template_instantiated"][0]
     assert entry["detail"]["requested_version"] == 1
