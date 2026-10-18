@@ -60,6 +60,25 @@ evidence.
   two records. Steps run in plan order; verification diffs every
   step, and a failed step is named by its number — a plan is never
   a partial success.
+- **Multi-page flows** — the console's pages are governed data:
+  a catalogue (page id, title, the record kinds each page hosts)
+  that the role allowlists reference, served at
+  `GET /api/pages`. A plan's span is derived from its steps — a
+  plan spanning two or more pages is a **multi-page flow** and
+  says so on the plan, in the API and in the console — and both
+  the planner's and the executor's roles must allow every page
+  it names, at plan time and again at execution. When steps
+  cross pages, the execution carries an explicit **navigation**
+  between them: the offline driver records the transition on the
+  attempt (page left, page arrived on, the step it precedes),
+  and the live bridge must report its move before reporting work
+  on the new page — a step report that crosses pages without one
+  is a protocol violation, refused and recorded, never silently
+  accepted. The grammar's cross-page shape: a credit memo that
+  also updates the **invoice's customer** in the same task — the
+  customer read from the invoice record, never named in the
+  text — verified end to end with a linkage check tying the
+  updated customer to the memo's invoice.
 - **Plan amendments and diffs** — while a plan awaits confirmation,
   an operator may amend its values; every amended value passes the
   same policy checks as planning, the amendment becomes plan
@@ -107,8 +126,9 @@ evidence.
   not remembered phrasings: a **template** is a task-text
   pattern with named parameter slots, a note on when to use it,
   and a version — seeded with the console's grammar (credit
-  memo, credit memo and settle, ship order, order status,
-  invoice status, customer update). Publishing a new version is
+  memo, credit memo and settle, credit memo and customer
+  update, ship order, order status, invoice status, customer
+  update). Publishing a new version is
   a supervisor-only recorded act; old versions stay readable
   and instantiable by name and version. Instantiating one
   validates its slots (a record slot must name a record that
@@ -252,6 +272,7 @@ The console seeds itself on first run. Try, in the Copilot tab:
 
 - `raise a credit memo for invoice 4471, reason damaged goods, $120` → plan, confirm, run, VERIFIED
 - `raise a credit memo for invoice 4471, reason damaged goods, $120 and mark invoice 4471 as paid` → one plan, two records
+- `raise a credit memo for invoice 4471, reason damaged goods, $120 and update the customer's email to creditnotes@harbourview.example` → one plan, two pages: the memo, and the invoice's customer updated
 - `mark order 1032 as shipped, ship date 2026-10-20, carrier DHL` → a three-step plan on one record
 - `mark order 1032 as shipped` → a one-field plan, diffed exactly
 - `raise a credit memo for invoice 4471, reason goodwill, $900` → refused at plan time (cap is $500)
@@ -298,6 +319,7 @@ so a task it cannot derive exactly is refused as
 |---|---|
 | Credit memo | `raise a credit memo for invoice 4471, reason damaged goods, $120` |
 | Credit memo + settle | `… $120 and mark invoice 4471 as paid` |
+| Credit memo + customer update | `… $120 and update the customer's email to creditnotes@harbourview.example` (cross-page: Invoices → Customers) |
 | Order status | `mark order 1032 as shipped` |
 | Ship with details | `mark order 1032 as shipped, ship date 2026-10-20, carrier DHL` |
 | Compound status | `mark order 1036 as packed and mark invoice 4474 as paid` |
@@ -327,7 +349,9 @@ created credit memo names the task that created it, names the
 customer of the invoice it was planned against, and appears on
 that invoice's own memo list (the console's rule for showing it);
 the invoice's customer exists; a touched order or invoice still
-names a customer that exists; and the execution record in the
+names a customer that exists; a customer a cross-page plan
+updates is the customer of the invoice its credit memo was
+planned against; and the execution record in the
 audit trail (who ran the step, when) agrees with the state the
 re-read found. The store underneath is one source of truth — the
 independence is the path: neither the mutation path nor the
@@ -372,6 +396,12 @@ reason, the partial state left standing) and `abandon_refused`.
 The attempt records behind them are readable at
 `GET /api/tasks/{id}/attempts` and in the task detail; the exits
 are `POST /api/tasks/{id}/resume`, `/restart`, and `/abandon`.
+An attempt's record carries its page navigations too; the live
+bridge reports a move at `POST /api/tasks/{id}/navigation`, and
+a crossing the protocol refuses is on the trail as
+`page_navigated`, `navigation_refused`, or
+`step_report_refused`. The console's pages read at
+`GET /api/pages`.
 Plan versions stay readable
 (`GET /api/tasks/{id}/plans`), and
 `GET /api/tasks/{id}/plan-diff?from_version=1&to_version=2`
@@ -469,7 +499,7 @@ src/page_agent_copilot/
 frontend/         package.json pins page-agent@1.12.4; build.mjs
                   bundles it to static/vendor/page-agent.bundle.js
 migrations/       numbered SQL, PostgreSQL + SQLite dialects
-evals/            the scripted-task gate (61 cases)
+evals/            the scripted-task gate (71 cases)
 tests/            the pytest suite
 docs/             architecture notes
 ```
@@ -477,9 +507,9 @@ docs/             architecture notes
 ## Tests and evals
 
 ```bash
-make test    # 247 passed, 1 skipped (the PostgreSQL conformance leg
+make test    # 273 passed, 1 skipped (the PostgreSQL conformance leg
              # is env-gated on COPILOT_TEST_DATABASE_URL)
-make evals   # 65/65 cases: happy paths diffed exactly (including
+make evals   # 71/71 cases: happy paths diffed exactly (including
              # multi-record plans), all three plan-time refusals,
              # the unconfirmed-execution gate, a tampered write
              # caught as DISCREPANCY with its step named, amendment
@@ -560,7 +590,16 @@ make evals   # 65/65 cases: happy paths diffed exactly (including
              # partial state), a resume after exhaustion
              # verifying on a fresh attempt budget, and
              # agent-config serving the Policy ceiling as
-             # maxSteps
+             # maxSteps — and multi-page flows: the
+             # cross-page shape verified with exact diffs on
+             # both records and its cross-page linkage green,
+             # a role missing a page refused at plan time
+             # naming the page, a page lost after confirmation
+             # blocking execution with the task held, the
+             # navigation recorded on the attempt (spending no
+             # step budget), a bridge report that skips the
+             # navigation refused and recorded before the run
+             # completes, and single-page plans unchanged
 ```
 
 ## Honest status
@@ -571,8 +610,9 @@ make evals   # 65/65 cases: happy paths diffed exactly (including
   bridge is written against the installed package's verified API
   (constructor config and `execute()` result shape are quoted in
   `docs/architecture.md`), and the shell side of the live path —
-  arming, step reports, verification — is fully covered by tests
-  and evals that simulate the browser's reports. One live-path
+  arming, step reports, navigation reports, verification — is
+  fully covered by tests and evals that simulate the browser's
+  reports. One live-path
   behaviour follows from that split: when a step reports failure,
   the shell stops the execution (EXECUTION_FAILED) and refuses
   the bridge's later reports, so the run halts in the shell; a

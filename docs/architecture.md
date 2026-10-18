@@ -493,6 +493,53 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   refused report's work in the page, so that write stands as
   named partial state — nothing is verified, and nothing is
   silently overrun or silently rolled back.
+- **Multi-page flows** (round 12) — the console's pages as
+  governed data, and the navigation an execution owes when it
+  crosses between them. `roles.py` holds the catalogue: each
+  page's id (the name a plan step carries and a role's allowlist
+  references), its title, and the record kinds it hosts —
+  Invoices hosts credit memos as well as invoices — with
+  `KNOWN_PAGES` derived from it and a test pinning the catalogue
+  to the planner's `PAGE_FOR_KIND`, so the two statements of the
+  page map can never drift. `GET /api/pages` serves it. A plan's
+  span is derived from its steps on every read (`Plan.pages`,
+  in the order the plan first reaches each page;
+  `is_multi_page`), served on every plan payload and shown in
+  the console; a plan spanning two or more pages is a multi-page
+  flow, and both the planner's and the executor's roles must
+  allow every page it names — the R3 allowlist check
+  (`plan_problems`, `page_not_permitted`) already runs at plan
+  time, at amendment, and again at execution against the
+  definitions then in force, so a role that loses a page after
+  confirmation holds the task at CONFIRMED with the page named,
+  on `execute` and on the recovery gates alike; round 12 pins
+  that for pages on both the planner's and the executor's side.
+  When consecutive steps change page, the execution carries an
+  explicit **navigation**: the offline driver records a no-op
+  transition on the attempt (page left, page arrived on, the
+  step it precedes — a resumed attempt records the crossing it
+  still owes from where the plan left it), and the live bridge
+  reports its move (`POST /api/tasks/{id}/navigation`), which
+  the shell checks against where the execution actually stands
+  — the page of its latest accepted act, across every attempt
+  the execution counts — and the page of the next step it still
+  owes. A navigation that starts elsewhere, arrives on the
+  wrong page, or is owed by nobody is refused and recorded
+  (`navigation_refused`); a step report claiming work on a new
+  page with no navigation behind it is a bridge protocol
+  violation, refused and recorded (`step_report_refused`,
+  `navigation_missing`) with the attempt left running, never
+  silently accepted. Navigations are not steps: they consume
+  no step budget. The grammar's one cross-page shape rides on
+  it: a credit memo that also updates the invoice's customer
+  ("... and update the customer's email to ...") — memo on
+  Invoices, the field update on Customers, the customer read
+  from the invoice record (never named in the text; naming one
+  refuses the task whole), verified end to end with a linkage
+  check (`invoice_customer_link`) tying the updated customer to
+  the memo's invoice. All of this stays at the shell-protocol
+  level: the bridge's in-browser move between screens is the
+  same honest unrun gap as the rest of the live path.
 - **Store port** (`store.py`) — records as JSON documents keyed by
   (kind, id); tasks, versioned plans, audit entries. In-memory,
   SQLite (local default, `./data/copilot.db`), PostgreSQL
@@ -564,6 +611,13 @@ operator ──task──▶ intake ──▶ planner ──▶ plan (stored, ve
   counts, and the ceilings in force), riding ahead of the
   ordinary `step_failed` / `execution_failed` pair, whose
   entries now also carry the exhaustion and its reason.
+  Multi-page flows add: `page_navigated` (the step the move
+  precedes, the page left, the page arrived on, the attempt,
+  the driver), `navigation_refused` (the reported move, where
+  the execution actually stands, and the code that refused it),
+  and `step_report_refused` (a live step report refused as a
+  protocol violation — today, a report that crosses pages with
+  no navigation reported, `navigation_missing`).
 
 ## The PageAgent API, as verified
 
