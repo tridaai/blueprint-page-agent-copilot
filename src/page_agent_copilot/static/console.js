@@ -699,6 +699,57 @@
     box.appendChild(note);
   }
 
+  // Clarification (round 14): a task whose derivation matched
+  // a governed shape in more than one way parks here with a
+  // question composed in code and options computed from the
+  // records. The console offers exactly those options — one
+  // button each, posting the option's value under the named
+  // operator — and answered questions stay listed, so the
+  // choices are visible on the task itself. There is no
+  // free-text answer box: the shell never interprets a reply
+  // into a value.
+  function renderClarification(task) {
+    const div = $("task-clarify");
+    div.innerHTML = "";
+    (task.clarifications || []).forEach((c) => {
+      if (c.answer != null) {
+        const done = document.createElement("p");
+        done.textContent =
+          `Clarified: ${c.question} → ${c.answer} ` +
+          `(answered by ${c.answerer}).`;
+        div.appendChild(done);
+      }
+    });
+    if (task.status !== "AWAITING_CLARIFICATION") return;
+    const pending = (task.clarifications || [])
+      .find((c) => c.answer == null);
+    if (!pending) return;
+    const q = document.createElement("p");
+    const lead = document.createElement("b");
+    lead.textContent = "Clarification needed. ";
+    q.appendChild(lead);
+    q.appendChild(document.createTextNode(pending.question));
+    div.appendChild(q);
+    pending.options.forEach((o) => {
+      const btn = document.createElement("button");
+      btn.className = "act secondary";
+      btn.textContent = o.label;
+      btn.addEventListener("click", async () => {
+        await actOnTask(`/api/tasks/${task.task_id}/clarify`,
+          { operator: asOperator(), choice: o.value },
+          async () => { refreshTasks(); openTask(task.task_id); });
+      });
+      div.appendChild(btn);
+    });
+    const note = document.createElement("p");
+    note.className = "note";
+    note.textContent =
+      "Picking an option re-runs derivation with that choice " +
+      "pinned. Nothing is planned until the question is " +
+      "answered, and the answer is recorded on the task.";
+    div.appendChild(note);
+  }
+
   async function openTask(taskId) {
     const detail = await api("/api/tasks/" + taskId);
     const { task, plan, plan_versions, verification, attempts } =
@@ -711,6 +762,7 @@
       `<span class="chip ${task.status}">${task.status}</span>`;
     $("task-refusal").textContent =
       task.status === "REFUSED" ? task.refusal_reason : "";
+    renderClarification(task);
     $("task-stale").textContent = task.status === "STALE"
       ? "Stale — these records changed after the plan was derived: " +
         (task.stale_records || []).join(", ") +
@@ -750,7 +802,8 @@
     }
     const owner = roleData.operators.find((o) => o.id === task.operator);
     const orphanState = ["PLANNED", "CONFIRMED", "STALE",
-      "EXECUTION_FAILED"].includes(task.status);
+      "EXECUTION_FAILED", "AWAITING_CLARIFICATION"]
+      .includes(task.status);
     if (owner && owner.active === false && orphanState) {
       pickupDiv.appendChild(document.createTextNode(
         `Orphaned work: ${task.operator} is deactivated and this ` +
@@ -866,7 +919,10 @@
                    operator: $("task-operator").value || "operator" };
     const { task } = await api("/api/tasks", json("POST", body));
     $("task-create-note").textContent =
-      task.status === "REFUSED" ? task.refusal_reason : "Plan drafted.";
+      task.status === "REFUSED" ? task.refusal_reason
+      : task.status === "AWAITING_CLARIFICATION"
+        ? "Clarification needed — the task is open below; pick an option."
+        : "Plan drafted.";
     refreshTasks(); openTask(task.task_id);
   });
   // Task actions go through here so a refusal — the gate's 409, a
