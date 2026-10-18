@@ -1732,6 +1732,163 @@ def _():
                for r in rows), f"budget rows {rows}")
 
 
+# -- Round 12: multi-page flows --------------------------------------------
+# Pages as governed data: a plan declares the pages it spans, an
+# execution records the navigation when it crosses between them,
+# and the grammar's one cross-page shape — a credit memo that
+# also updates the invoice's customer — plans under both pages'
+# allowlists and verifies end to end across both records.
+
+CROSS_PAGE = ("raise a credit memo for invoice 4471, reason "
+              "damaged goods, $120 and update the customer's "
+              "email to creditnotes@harbourview.example")
+
+
+@case("multi-page: the cross-page shape verifies, exact diffs on both records")
+def _():
+    svc = fresh()
+    cust_before = svc.store.get_record("customers", "2041")
+    task = svc.intake(CROSS_PAGE, "op")
+    expect(task.status == TaskStatus.PLANNED, f"status {task.status}")
+    plan = svc.get_plan(task.task_id)
+    expect(plan.pages == ["Invoices", "Customers"],
+           f"pages {plan.pages}")
+    expect(plan.is_multi_page, "the plan does not say it spans pages")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    memos = svc.store.list_records("credit_memos")
+    expect(len(memos) == 1, f"{len(memos)} memos")
+    memo = memos[0]
+    expect(memo["invoice_id"] == "4471" and memo["amount"] == "120.00"
+           and memo["reason"] == "damaged goods"
+           and memo["status"] == "issued", f"memo {memo}")
+    cust_after = svc.store.get_record("customers", "2041")
+    changed = {k for k in cust_after
+               if cust_after[k] != cust_before[k]}
+    expect(changed == {"email"}, f"customer changed fields {changed}")
+    expect(cust_after["email"] == "creditnotes@harbourview.example",
+           "the customer's email did not land")
+    report = svc.get_verification(task.task_id)
+    expect(report.ok, "the verification report is not clean")
+    links = [c for c in report.linkage_checks
+             if c.check == "invoice_customer_link"]
+    expect(len(links) == 1 and links[0].verdict == "match",
+           f"cross-page linkage {links}")
+    kinds = {c.record_kind for c in report.field_checks}
+    expect(kinds == {"credit_memos", "customers"},
+           f"field checks cover {kinds}")
+
+
+@case("multi-page: a role missing a page refuses the shape at plan time")
+def _():
+    svc = fresh()
+    raw = svc.get_role("operator").model_dump(mode="json")
+    raw["pages"] = [p for p in raw["pages"] if p != "Customers"]
+    svc.update_role("operator", raw, "s.hale")
+    task = svc.intake(CROSS_PAGE, "op")
+    expect(task.status == TaskStatus.REFUSED, f"status {task.status}")
+    expect(task.refusal_reason.startswith("page_not_permitted"),
+           f"reason {task.refusal_reason}")
+    expect("Customers" in task.refusal_reason,
+           "the refusal does not name the missing page")
+    expect(svc.store.list_records("credit_memos") == [],
+           "a memo landed behind a refused plan")
+
+
+@case("multi-page: a page lost after confirmation blocks execution")
+def _():
+    svc = fresh()
+    task = svc.intake(CROSS_PAGE, "op")
+    svc.confirm(task.task_id, "s.hale")
+    raw = svc.get_role("operator").model_dump(mode="json")
+    raw["pages"] = [p for p in raw["pages"] if p != "Customers"]
+    svc.update_role("operator", raw, "s.hale")
+    try:
+        svc.execute(task.task_id, "offline")
+        expect(False, "execution ran on a page the role had lost")
+    except GateError as exc:
+        expect("Customers" in str(exc), f"refusal {exc}")
+    held = svc.get_task(task.task_id)
+    expect(held.status == TaskStatus.CONFIRMED,
+           f"held status {held.status}")
+    refused = [e for e in svc.audit(task.task_id)
+               if e["event"] == "execution_refused"]
+    expect(refused and refused[-1]["detail"]["code"]
+           == "page_not_permitted"
+           and refused[-1]["detail"]["page"] == "Customers",
+           f"refusals {refused}")
+
+
+@case("multi-page: navigation is recorded on the attempt for a two-page plan")
+def _():
+    svc = fresh()
+    task = svc.intake(CROSS_PAGE, "op")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    attempt = svc.get_attempts(task.task_id)[0]
+    expect(len(attempt.navigations) == 1,
+           f"navigations {attempt.navigations}")
+    nav = attempt.navigations[0]
+    expect((nav.seq, nav.from_page, nav.to_page, nav.driver)
+           == (2, "Invoices", "Customers", "offline"), f"nav {nav}")
+    expect(len(attempt.steps) == 2,
+           "a navigation consumed a step of the budget")
+    events = [e for e in svc.audit(task.task_id)
+              if e["event"] == "page_navigated"]
+    expect(len(events) == 1, f"page_navigated events {events}")
+
+
+@case("multi-page: a bridge report that skips the navigation is refused")
+def _():
+    svc = fresh()
+    task = svc.intake(CROSS_PAGE, "op")
+    svc.confirm(task.task_id, "s.hale")
+    svc.execute(task.task_id, "page-agent-live")
+    create_credit_memo(
+        svc.store,
+        {"invoice_id": "4471", "amount": "120.00",
+         "reason": "damaged goods", "status": "issued"},
+        task_id=task.task_id)
+    svc.report_step(task.task_id, 1, StepReportIn(ok=True))
+    apply_field_change(svc.store, "customers", "2041", "email",
+                       "creditnotes@harbourview.example")
+    try:
+        svc.report_step(task.task_id, 2, StepReportIn(ok=True))
+        expect(False, "a cross-page report was accepted silently")
+    except GateError as exc:
+        expect("navigation_missing" in str(exc), f"refusal {exc}")
+    refused = [e for e in svc.audit(task.task_id)
+               if e["event"] == "step_report_refused"]
+    expect(len(refused) == 1
+           and refused[0]["detail"]["code"] == "navigation_missing",
+           f"refusals {refused}")
+    expect(svc.get_task(task.task_id).status == TaskStatus.CONFIRMED,
+           "the refusal disturbed the running attempt")
+    svc.report_navigation(task.task_id, NavigationReportIn(
+        from_page="Invoices", to_page="Customers"))
+    task = svc.report_step(task.task_id, 2, StepReportIn(ok=True))
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+
+
+@case("multi-page: single-page plans are unchanged")
+def _():
+    svc = fresh()
+    task = svc.intake(
+        "raise a credit memo for invoice 4471, reason damaged "
+        "goods, $120 and mark invoice 4471 as paid", "op")
+    plan = svc.get_plan(task.task_id)
+    expect(plan.pages == ["Invoices"] and not plan.is_multi_page,
+           f"pages {plan.pages}")
+    svc.confirm(task.task_id, "s.hale")
+    task = svc.execute(task.task_id, "offline")
+    expect(task.status == TaskStatus.VERIFIED, f"status {task.status}")
+    attempt = svc.get_attempts(task.task_id)[0]
+    expect(attempt.navigations == [],
+           f"navigations {attempt.navigations}")
+
+
 def main() -> int:
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     for name, ok, detail in RESULTS:
