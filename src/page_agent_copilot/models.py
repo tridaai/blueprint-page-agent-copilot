@@ -148,6 +148,15 @@ class TaskStatus(str, Enum):
                                    # execution refused, re-plan required
     REJECTED = "REJECTED"          # a human rejected the plan; the
                                    # route onward is a fresh intake
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+                                   # a driver step failed mid-plan;
+                                   # execution stopped at that step and
+                                   # the completed steps stand as they
+                                   # landed — the exits are resume,
+                                   # restart, or abandon, all recorded
+    ABANDONED = "ABANDONED"        # a failed execution an operator
+                                   # closed, with a reason; the partial
+                                   # state stays on the records, named
 
 
 class Task(BaseModel):
@@ -177,6 +186,21 @@ class Task(BaseModel):
     # discrepancy by accepting it: who, and the mandatory reason.
     deviation_accepted_by: Optional[str] = None
     deviation_reason: Optional[str] = None
+    # Execution attempts: how many have run (the attempt records
+    # themselves are stored records, kind `executions`), and the
+    # latest failure's summary, mirrored here so the task names it
+    # wherever the task is shown — the failed step and the driver's
+    # error, verbatim. Cleared when a new attempt starts; set again
+    # if that attempt fails.
+    attempts: int = 0
+    failed_step: Optional[int] = None
+    failure_error: Optional[str] = None
+    # The abandonment, when an operator closes a failed execution:
+    # who, and the mandatory reason. The partial state the task was
+    # left in is named in the final attempt's record and in the
+    # audit entry — it is never cleaned up quietly.
+    abandoned_by: Optional[str] = None
+    abandon_reason: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -190,6 +214,48 @@ class StepOutcome(BaseModel):
     before: dict[str, Any] = Field(default_factory=dict)
     after: dict[str, Any] = Field(default_factory=dict)
     detail: str = ""
+
+
+class ExecutionAttempt(BaseModel):
+    """One execution attempt at a task's confirmed plan, as a
+    stored record (kind `executions`, keyed `<task_id>:<number>`).
+
+    Attempts are numbered from 1 and never rewritten once they
+    finish: attempt 1 is the `execute` act; a `resume` or `restart`
+    after a failure is attempt n+1, with `mode` saying which.
+    While an attempt's outcome is `running` it is also the task's
+    execution claim — a second execute/resume/restart is refused
+    until it finishes (for the offline driver an attempt finishes
+    inside the call that started it; for the live bridge it stays
+    running across the step reports, which is exactly the window
+    a concurrent execution must not enter).
+
+    `steps` holds every outcome this attempt produced, in order —
+    the completed steps with their before/after values, and, when
+    the attempt failed, the failed step last with `ok` False and
+    its `detail` the driver's error verbatim. `state_lines` names,
+    line by line, the state the attempt left in place: on a failed
+    attempt that is the partial state, and it is what an
+    abandonment records.
+    """
+
+    task_id: str
+    number: int
+    driver: str
+    plan_version: int
+    mode: str  # "execute" | "resume" | "restart"
+    outcome: str = "running"  # "running" | "completed" | "failed"
+    # For the live flow, the attempt number from which completed
+    # steps count toward this execution: a resume counts from 1
+    # (earlier attempts' work stands); a restart counts from its
+    # own number (the plan runs again from step 1).
+    base_attempt: int = 1
+    started_at: str = ""
+    finished_at: str = ""
+    steps: list[StepOutcome] = Field(default_factory=list)
+    failed_seq: Optional[int] = None
+    error: Optional[str] = None
+    state_lines: list[str] = Field(default_factory=list)
 
 
 class FieldDiff(BaseModel):
@@ -368,6 +434,29 @@ class AcceptDeviationIn(BaseModel):
     """Accept a discrepancy's named deviation. A supervisor act
     (a role with can_administer), and the reason is mandatory:
     an acceptance without one is refused."""
+    operator: str
+    reason: str = ""
+
+
+class ResumeIn(BaseModel):
+    """Resume a failed execution: run only the steps that never
+    completed. The operator rides along (defaulting to the task's
+    own operator) — the resume is an execution act and the
+    executor's role is re-checked, as at execution."""
+    operator: Optional[str] = None
+
+
+class RestartIn(BaseModel):
+    """Restart a failed execution from step 1, as a new attempt.
+    Refused once any CREATE step has completed — a created record
+    is never created twice."""
+    operator: Optional[str] = None
+
+
+class AbandonIn(BaseModel):
+    """Abandon a failed execution. The operator closes the task
+    with a mandatory reason; the partial state stays on the
+    records and is named in the audit entry."""
     operator: str
     reason: str = ""
 

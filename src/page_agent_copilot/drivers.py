@@ -20,7 +20,12 @@ A plan step is executed by exactly one of:
   way.
 
 Both paths produce StepOutcome records; audit and verification
-consume them identically.
+consume them identically. A step can also fail — an element the
+live agent cannot find, a form the console rejects, a bridge that
+times out — and then the outcome carries `ok` False and the
+driver's error verbatim. The shell stops the execution at that
+step; what happens next (resume, restart, abandon) is the
+service's decision, recorded like everything else.
 """
 
 from __future__ import annotations
@@ -50,15 +55,37 @@ class OfflineDriver:
     so the evals can prove the verifier catches a wrong write and
     reports DISCREPANCY rather than success. Nothing in the running
     service ever passes it.
+
+    `fail` is the companion hook: a map of step seq -> the error
+    the step fails with, verbatim (an element not found, a form
+    rejected, a bridge timeout — the failures a live driver meets
+    in a real console). A failed step writes nothing and returns an
+    outcome with `ok` False and the error as its `detail`; the
+    shell stops the execution there and records the failure.
+    Nothing in the running service passes this either.
     """
 
     name = DRIVER_OFFLINE
 
-    def __init__(self, tamper: Optional[dict[int, str]] = None) -> None:
+    def __init__(self, tamper: Optional[dict[int, str]] = None,
+                 fail: Optional[dict[int, str]] = None) -> None:
         self._tamper = tamper or {}
+        self._fail = fail or {}
 
     def run_step(self, store: Store, task: Task, plan: Plan,
                  step: PlanStep) -> StepOutcome:
+        if step.seq in self._fail:
+            before: dict = {}
+            if step.action == StepAction.SET:
+                record = store.get_record(
+                    step.record_kind, step.record_id or "")
+                if record is not None and step.field:
+                    before = {
+                        step.field: str(record.get(step.field, ""))}
+            return StepOutcome(
+                seq=step.seq, driver=self.name, ok=False,
+                before=before, after={},
+                detail=self._fail[step.seq])
         if step.action == StepAction.SET:
             value = self._tamper.get(step.seq, step.value or "")
             before, after = apply_field_change(

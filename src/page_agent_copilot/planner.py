@@ -403,6 +403,11 @@ def _step_targets(step: PlanStep) -> list[tuple[str, str]]:
     return []
 
 
+# Public alias: the service's resume check asks which records a
+# step rests on, to re-check exactly those preconditions.
+step_targets = _step_targets
+
+
 def capture_preconditions(store: Store,
                           plan: Plan) -> list[RecordPrecondition]:
     """Hash every record the plan touches, as it stands now. Called
