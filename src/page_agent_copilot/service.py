@@ -2734,7 +2734,7 @@ class CopilotService:
             # reports each step back. The attempt stays running —
             # the claim — until the final report lands or a step
             # reports failure (see report_step).
-            self._audit(task_id, task.operator, "execution_started", {
+            self._audit(task_id, executor, "execution_started", {
                 "driver": driver, "plan_version": plan.version,
                 "attempt": attempt.number, "steps": len(plan.steps)})
             return task

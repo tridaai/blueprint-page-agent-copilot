@@ -574,12 +574,18 @@
   });
   $("credit-memo-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const memo = await api("/api/console/credit-memos", json("POST", {
+    const res = await fetch("/api/console/credit-memos", json("POST", {
       fields: { invoice_id: $("cm-invoice-id").value,
                 reason: $("cm-reason").value,
                 amount: $("cm-amount").value, status: "issued" },
       task_id: $("cm-task-id").value || null,
     }));
+    const memo = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("cm-note").textContent =
+        "Not issued: " + (memo.detail || `-> ${res.status}`);
+      return;
+    }
     $("cm-note").textContent = "Issued " + memo.id + ".";
     openInvoice($("cm-invoice-id").value);
   });
@@ -928,6 +934,7 @@
     const { task, plan, plan_versions, verification, attempts } =
       detail;
     current.task = task;
+    current.attempts = attempts || [];
     current.readbackToken = "";
     $("task-detail").hidden = false;
     $("task-id-label").textContent = task.task_id;
@@ -1171,7 +1178,10 @@
     const { task } = await api("/api/tasks/transcript",
                                json("POST", body));
     $("task-create-note").textContent =
-      task.status === "REFUSED" ? task.refusal_reason : "Plan drafted.";
+      task.status === "REFUSED" ? task.refusal_reason
+      : task.status === "AWAITING_CLARIFICATION"
+        ? "Clarification needed — the task is open below; pick an option."
+        : "Plan drafted.";
     refreshTasks(); openTask(task.task_id);
   });
   $("task-run-offline").addEventListener("click", async () => {
@@ -1217,16 +1227,23 @@
   // the failed task; abandon closes it with a mandatory reason.
   // Refusals — a moved basis, a create already landed — surface
   // with the server's reason, like every other act.
-  $("task-resume").addEventListener("click", async () => {
-    await actOnTask(`/api/tasks/${current.task.task_id}/resume`,
+  // A failed live execution recovers under its own driver: the
+  // shell re-arms it and waits for the bridge's step reports, so
+  // the act goes through the bridge, which runs the steps owed.
+  async function recover(path) {
+    const taskId = current.task.task_id;
+    const act = () => actOnTask(`/api/tasks/${taskId}/${path}`,
       { operator: asOperator() },
-      async () => { refreshAll(); openTask(current.task.task_id); });
-  });
-  $("task-restart").addEventListener("click", async () => {
-    await actOnTask(`/api/tasks/${current.task.task_id}/restart`,
-      { operator: asOperator() },
-      async () => { refreshAll(); openTask(current.task.task_id); });
-  });
+      async () => { refreshAll(); openTask(taskId); });
+    const last = (current.attempts || []).slice(-1)[0];
+    if (last && last.driver === "page-agent-live" && window.CopilotBridge) {
+      await window.CopilotBridge.recoverLive(taskId, act);
+      return;
+    }
+    await act();
+  }
+  $("task-resume").addEventListener("click", () => recover("resume"));
+  $("task-restart").addEventListener("click", () => recover("restart"));
   $("task-abandon").addEventListener("click", async () => {
     await actOnTask(`/api/tasks/${current.task.task_id}/abandon`,
       { operator: asOperator(),
@@ -1288,6 +1305,6 @@
 
   window.OrderDesk = {
     showScreen, openOrder, openCustomer, openInvoice, openTask,
-    refreshAll, current: () => current,
+    refreshAll, current: () => current, operator: asOperator,
   };
 })();

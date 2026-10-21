@@ -102,3 +102,42 @@ def test_console_page_served(client):
     assert page.status_code == 200
     assert "OrderDesk" in page.text
     assert "page-agent.bundle.js" in page.text
+
+
+def test_console_credit_memo_amount_is_a_money_field(client):
+    # The console form's amount is validated and stored to the cent:
+    # text that is not a positive amount never reaches the records,
+    # and "120" lands as the "120.00" a plan states.
+    for bad in ("abc", "0", "-5", "", "NaN"):
+        refused = client.post("/api/console/credit-memos", json={
+            "fields": {"invoice_id": "4471", "reason": "damaged goods",
+                       "amount": bad}})
+        assert refused.status_code == 422, bad
+    no_reason = client.post("/api/console/credit-memos", json={
+        "fields": {"invoice_id": "4471", "reason": " ", "amount": "10"}})
+    assert no_reason.status_code == 422
+    assert client.get("/api/console/credit-memos").json() == []
+    issued = client.post("/api/console/credit-memos", json={
+        "fields": {"invoice_id": "4471", "reason": "damaged goods",
+                   "amount": "$120"}})
+    assert issued.status_code == 200
+    assert issued.json()["amount"] == "120.00"
+
+
+def test_live_execute_is_attributed_to_the_executor(client):
+    # The live bridge names the operator on the console as the
+    # executor: the role gate applies to that name, and the
+    # execution_started act is theirs — not the planner's.
+    tid = client.post("/api/tasks", json={
+        "text": "mark order 1036 as packed",
+        "operator": "j.okafor"}).json()["task"]["task_id"]
+    client.post(f"/api/tasks/{tid}/confirm", json={"operator": "s.hale"})
+    viewer = client.post(f"/api/tasks/{tid}/execute", json={
+        "driver": "page-agent-live", "operator": "v.ward"})
+    assert viewer.status_code == 409
+    armed = client.post(f"/api/tasks/{tid}/execute", json={
+        "driver": "page-agent-live", "operator": "s.hale"})
+    assert armed.status_code == 200
+    started = [e for e in client.get(f"/api/tasks/{tid}/audit").json()
+               if e["event"] == "execution_started"]
+    assert [e["actor"] for e in started] == ["s.hale"]

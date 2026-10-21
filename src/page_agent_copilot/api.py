@@ -11,6 +11,7 @@ surface as HTTP 422 with the refusal code, and change nothing.
 from __future__ import annotations
 
 import logging
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
 
@@ -273,11 +274,29 @@ def create_app(settings: Optional[Settings] = None,
     def issue_credit_memo(body: ConsoleSaveIn):
         """The credit memo form's submit — used by a human at the
         console and by the in-page agent in the live path alike."""
-        fields = body.fields
+        fields = dict(body.fields)
         invoice = store.get_record("invoices", fields.get("invoice_id", ""))
         if invoice is None:
             return JSONResponse(status_code=422, content={
                 "detail": "invoice_id does not name an invoice"})
+        if not str(fields.get("reason", "")).strip():
+            return JSONResponse(status_code=422, content={
+                "detail": "a credit memo needs a reason"})
+        # The amount is a money field: a positive figure, stored to
+        # the cent — so "120" typed into the form lands as the
+        # "120.00" a plan states, and text that is not an amount
+        # never reaches the records.
+        raw = str(fields.get("amount", "")).strip().lstrip("$")
+        try:
+            amount = Decimal(raw.replace(",", ""))
+            if not amount.is_finite() or amount <= 0:
+                raise InvalidOperation
+            amount = amount.quantize(Decimal("0.01"))
+        except InvalidOperation:
+            return JSONResponse(status_code=422, content={
+                "detail": f"amount '{fields.get('amount', '')}' is not "
+                          f"a positive money amount"})
+        fields["amount"] = str(amount)
         return create_credit_memo(store, fields, task_id=body.task_id)
 
     # -- governed tasks ---------------------------------------------------
