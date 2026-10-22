@@ -23,7 +23,10 @@ from .batches import BatchCreateIn, BatchError
 from .config import Policy, Settings
 from .logging_setup import new_request_id, setup_logging
 from .models import (
+    INVOICE_STATUSES,
+    ORDER_STATUSES,
     PAYMENT_FIELDS,
+    PLANNABLE_FIELDS,
     AbandonIn,
     AcceptDeviationIn,
     AmendIn,
@@ -69,6 +72,10 @@ from .templates import (
 
 log = logging.getLogger("page_agent_copilot.api")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# The governed status values a console save may set, per kind — the
+# same sets the form's selects offer and the planner enforces.
+STATUSES_FOR_KIND = {"orders": ORDER_STATUSES,
+                     "invoices": INVOICE_STATUSES}
 
 
 def _plan_json(plan: Optional[Plan],
@@ -216,9 +223,27 @@ def create_app(settings: Optional[Settings] = None,
         record = store.get_record(kind, record_id)
         if record is None:
             raise KeyError(f"{kind} record {record_id} does not exist")
+        # A save carries only the fields the console's form edits —
+        # never the record's id, its customer, or its amounts — and
+        # a status only takes a governed value, as in the form's own
+        # select. This endpoint is also where the in-page agent's
+        # form submissions land, so it holds the line in code.
+        editable = PLANNABLE_FIELDS.get(kind, frozenset())
         for field, value in body.fields.items():
-            if field in record:
-                apply_field_change(store, kind, record_id, field, value)
+            if field not in editable:
+                return JSONResponse(status_code=422, content={
+                    "detail": f"'{field}' is not a field the "
+                              f"{kind[:-1]} form edits; editable "
+                              f"fields are "
+                              f"{', '.join(sorted(editable))}"})
+            governed = STATUSES_FOR_KIND.get(kind)
+            if field == "status" and governed and value not in governed:
+                return JSONResponse(status_code=422, content={
+                    "detail": f"{kind[:-1]} status '{value}' is not a "
+                              f"governed status "
+                              f"({', '.join(sorted(governed))})"})
+        for field, value in body.fields.items():
+            apply_field_change(store, kind, record_id, field, value)
         return store.get_record(kind, record_id)
 
     @app.get("/api/console/customers")
@@ -282,6 +307,12 @@ def create_app(settings: Optional[Settings] = None,
         if not str(fields.get("reason", "")).strip():
             return JSONResponse(status_code=422, content={
                 "detail": "a credit memo needs a reason"})
+        # A memo that names a task is linked to it by verification;
+        # a name that resolves to no task would be a link to nothing.
+        if body.task_id and service.get_task(body.task_id) is None:
+            return JSONResponse(status_code=422, content={
+                "detail": f"task_id '{body.task_id}' does not name a "
+                          f"task"})
         # The amount is a money field: a positive figure, stored to
         # the cent — so "120" typed into the form lands as the
         # "120.00" a plan states, and text that is not an amount

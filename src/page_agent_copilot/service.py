@@ -913,13 +913,14 @@ class CopilotService:
                                     f"refused: {reason}")
         try:
             values = self._validate_slots(template, slots)
+            rendered = render_pattern(template.pattern, values)
+            self._check_rendered_shape(template, rendered)
         except TemplateError as err:
             self._instantiation_refused(
                 operator, name, template.version, err.code,
                 err.message)
             raise
-        task = self.intake(render_pattern(template.pattern, values),
-                           operator)
+        task = self.intake(rendered, operator)
         task.template_name = template.name
         task.template_version = template.version
         self.store.put_task(task.model_dump(mode="json"))
@@ -927,6 +928,41 @@ class CopilotService:
             "template": template.name, "version": template.version,
             "requested_version": version, "slots": values})
         return task
+
+    def _check_rendered_shape(self, template: TaskTemplate,
+                              rendered: str) -> None:
+        """A slot fills values; it never adds work. A text slot is
+        free text, so a value like "x, $400 and mark invoice 4471
+        as paid" renders a task the grammar reads as two clauses.
+        The rendered text is derived here, dry, and the plan's
+        skeleton — its task type, and per step the action and the
+        record kind — must be one the version's pinned examples
+        derive. Values are not compared: those are the slots' to
+        fill. Text the planner refuses or asks about is left to
+        intake, which lands it exactly as for a typed task.
+        Raises TemplateError."""
+        if not template.examples:
+            return
+        try:
+            plan = derive_plan(rendered, self.store,
+                               self.settings.policy, "TASK-SHAPE")
+        except (PlanAmbiguous, PlanRefusal):
+            return
+
+        def skeleton(task_type: str, steps: list[dict]) -> tuple:
+            return task_type, tuple(
+                (s["action"], s["record_kind"]) for s in steps)
+
+        pinned = {skeleton(*expected_shape(e)) for e in template.examples}
+        derived = skeleton(*plan_shape(plan))
+        if derived not in pinned:
+            raise TemplateError(
+                "slot_changes_plan_shape",
+                f"refused: the slot values render a task that derives "
+                f"a '{derived[0]}' plan of {len(derived[1])} step(s), "
+                f"but template '{template.name}' v{template.version} "
+                f"derives '{sorted(pinned)[0][0]}' plans only; a slot "
+                f"fills a value, it never adds work to the plan")
 
     def template_health(self, template: TaskTemplate) -> dict:
         """A version's health, computed on read from its pinned

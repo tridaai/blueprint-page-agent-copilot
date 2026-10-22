@@ -24,6 +24,7 @@ high-stakes field, is confirmed by two distinct people, not one.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from .config import Policy
@@ -92,6 +93,19 @@ def check_field_change(kind: str, field: str, value: str) -> None:
             "value_not_governed",
             f"refused: invoice status '{value}' is not a governed status "
             f"({', '.join(sorted(INVOICE_STATUSES))})")
+    # A ship date is a calendar date, planned and amended alike: a
+    # date-shaped value that names no day ("2026-13-45") would land
+    # on the record and verify against itself.
+    if kind == "orders" and field == "ship_date":
+        try:
+            valid = date.fromisoformat(value).isoformat() == value
+        except ValueError:
+            valid = False
+        if not valid:
+            raise PlanRefusal(
+                "value_not_governed",
+                f"refused: ship date '{value}' is not a calendar date "
+                f"(YYYY-MM-DD)")
     if kind == "customers" and field == "credit_limit":
         try:
             if Decimal(value) < 0:

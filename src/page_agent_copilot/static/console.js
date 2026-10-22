@@ -1133,6 +1133,12 @@
     $("task-action-note").textContent = res.ok ? ""
       : "Refused: " + (data.detail || `${path} -> ${res.status}`);
     if (res.ok && after) await after();
+    // A refusal can still move the task — an execution refused as
+    // stale parks it in STALE — so re-read it and show where it
+    // stands; the refusal note above stays in place.
+    if (!res.ok && current.task) {
+      refreshTasks(); await openTask(current.task.task_id);
+    }
     return res.ok;
   }
   const asOperator = () => $("task-operator").value || "operator";

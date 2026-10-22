@@ -124,3 +124,33 @@ def test_refused_task_records_its_reason(service):
     assert task.refusal_reason.startswith("credit_above_cap")
     events = [e["event"] for e in service.audit(task.task_id)]
     assert events == ["task_created", "plan_refused"]
+
+
+def test_ship_date_must_be_a_calendar_date(store):
+    with pytest.raises(PlanRefusal) as exc:
+        derive_plan("mark order 1032 as shipped, ship date 2026-13-45, "
+                    "carrier DHL", store, Policy(), "T")
+    assert exc.value.code == "value_not_governed"
+
+
+def test_ship_details_in_another_shape_are_refused_not_dropped(store):
+    # "ship date tomorrow" is not the governed shape; planning the
+    # bare status change would quietly drop the date and carrier.
+    for text in ("mark order 1032 as shipped, ship date tomorrow, "
+                 "carrier DHL",
+                 "mark order 1032 as shipped, carrier DHL"):
+        with pytest.raises(PlanRefusal) as exc:
+            derive_plan(text, store, Policy(), "T")
+        assert exc.value.code == "no_plan_derivable", text
+
+
+def test_amended_ship_date_must_be_a_calendar_date(service):
+    from page_agent_copilot.models import AmendChangeIn
+
+    task = service.intake("mark order 1032 as shipped, ship date "
+                          "2026-10-20, carrier DHL", "op")
+    with pytest.raises(PlanRefusal) as exc:
+        service.amend(task.task_id, "op",
+                      [AmendChangeIn(seq=2, value="not-a-date")])
+    assert exc.value.code == "value_not_governed"
+    assert service.get_task(task.task_id).plan_version == 1

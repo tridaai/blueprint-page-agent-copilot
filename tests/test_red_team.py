@@ -343,6 +343,27 @@ def test_reason_slot_delete_smuggle_refuses(service):
     assert service.store.get_record("orders", "1033") is not None
 
 
+def test_reason_slot_cannot_add_a_governed_clause(service):
+    # A text slot carrying a whole governed clause used to render a
+    # task the grammar read as two: the credit-memo template
+    # derived a second step settling the invoice. The slot fills a
+    # value; the plan's shape is the template's.
+    tasks_before = len(service.list_tasks())
+    with pytest.raises(TemplateError) as exc:
+        service.instantiate_template(
+            "credit-memo", None,
+            {"invoice": "4471",
+             "reason": "x, $400 and mark invoice 4471 as paid",
+             "amount": "5"}, "op")
+    assert exc.value.code == "slot_changes_plan_shape"
+    assert len(service.list_tasks()) == tasks_before
+    assert service.store.get_record("invoices", "4471")["status"] \
+        == "open"
+    refusals = [e for e in service.template_audit()
+                if e["event"] == "template_instantiation_refused"]
+    assert refusals[-1]["detail"]["code"] == "slot_changes_plan_shape"
+
+
 def test_reason_slot_figure_cannot_redirect_the_amount(service):
     task = service.instantiate_template(
         "credit-memo", None,

@@ -130,6 +130,11 @@ SHIP_DETAIL_RE = re.compile(
     r"mark\s+order\s+(\d+)\s+as\s+shipped\s*,\s*ship\s+date\s+"
     r"(\d{4}-\d{2}-\d{2})\s*,\s*carrier\s+([A-Za-z][A-Za-z0-9 .&'-]*?)\s*$",
     re.I)
+# A ship date or carrier stated in any other shape — a date that is
+# not YYYY-MM-DD ("ship date tomorrow"), details out of order —
+# matches this and not the governed shape: refused, never planned
+# as the bare status change with the details quietly dropped.
+SHIP_DETAIL_LOOSE_RE = re.compile(r"\b(?:ship\s+date|carrier)\b", re.I)
 CUSTOMER_UPDATE_RE = re.compile(
     r"update\s+customer\s+(\d+)\s+([a-z ]+?)\s+to\s+(.+)$", re.I | re.S)
 # A record described by a governed status word instead of named
@@ -556,6 +561,13 @@ def _plan_status(text: str, store: Store, task_id: str,
             steps.append(_set_step(seq, "orders", order_id, field, value))
         return Plan(task_id=task_id, task_type="order_ship_details",
                     summary=_summarize(steps), steps=steps)
+    if SHIP_DETAIL_LOOSE_RE.search(text):
+        raise PlanRefusal(
+            "no_plan_derivable",
+            "refused: shipment details are planned only in the "
+            "governed form \"mark order <id> as shipped, ship date "
+            "YYYY-MM-DD, carrier <name>\"; a plan that dropped the "
+            "stated date or carrier would plan less than was asked")
     # A record described by its status instead of named by number:
     # "mark the packed order as shipped" (round 14). The clause
     # stands alone in its task — mixing it with a clause that

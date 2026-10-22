@@ -141,3 +141,29 @@ def test_live_execute_is_attributed_to_the_executor(client):
     started = [e for e in client.get(f"/api/tasks/{tid}/audit").json()
                if e["event"] == "execution_started"]
     assert [e["actor"] for e in started] == ["s.hale"]
+
+
+def test_console_save_edits_only_the_forms_fields(client):
+    # The save endpoint is where form submissions land — a human's
+    # or the in-page agent's. A field the form does not edit (the
+    # record's id, its customer, its total) and a status outside the
+    # governed set are refused, and nothing is written.
+    before = client.get("/api/console/orders").json()
+    for fields in ({"id": "9999"}, {"customer_id": "0000"},
+                   {"total": "abc"}, {"status": "flying"},
+                   {"status": "packed", "id": "9999"}):
+        res = client.put("/api/console/orders/1033",
+                         json={"fields": fields})
+        assert res.status_code == 422, fields
+    assert client.put("/api/console/invoices/4471", json={
+        "fields": {"status": "lost"}}).status_code == 422
+    assert client.get("/api/console/orders").json() == before
+
+
+def test_console_credit_memo_task_id_must_name_a_task(client):
+    res = client.post("/api/console/credit-memos", json={
+        "fields": {"invoice_id": "4471", "reason": "damaged goods",
+                   "amount": "10"},
+        "task_id": "TASK-GHOST"})
+    assert res.status_code == 422
+    assert client.get("/api/console/credit-memos").json() == []
