@@ -30,7 +30,9 @@ field by field**. Only an exact match is a success; every mismatch
 is a named discrepancy. The agent's own report is never the
 evidence.
 
-> **Work in progress** — this blueprint is built and passing its automated test and eval gates, but it has not yet finished hands-on local testing, and its companion blog post is not yet published. Expect changes. This notice comes off when both are done.
+<p><a href="https://trida.ai/blog/page-agent-admin-copilot-blueprint"><img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1792756973674-cover.webp" alt="Page Agent Admin Copilot Blueprint" width="600"></a></p>
+
+**Deep-dive:** [Page Agent Admin Copilot Blueprint](https://trida.ai/blog/page-agent-admin-copilot-blueprint) — how the agent works, where it stops, and what the evals actually prove.
 
 > **Independence.** This blueprint is Trida AI's own work. It is not
 > affiliated with, endorsed by, or partnered with Alibaba or the
